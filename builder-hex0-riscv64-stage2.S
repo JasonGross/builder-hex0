@@ -15,6 +15,7 @@
     .equ LOW_PAGE_TABLE,     0x81001000
     .equ USER_PHYS,          0x80600000
     .equ USER_VIRT,          0x00600000
+    .equ USER_HEAP_TOP,      0x02000000
     .equ USER_STACK_PHYS,    0x87e00000
     .equ USER_STACK_TOP,     0x08000000
     .equ KERNEL_STACK_TOP,   0x87dff000
@@ -26,6 +27,14 @@
     .equ FILE_TABLE,         0x83000000
     .equ FD_TABLE,           0x83010000
     .equ FILE_DATA,          0x84000000
+    .equ PARENT_FDS,         0x83f00000
+    .equ PARENT_FRAME,       0x83f02000
+    .equ EXEC_ARGV,          0x83f04000
+    .equ EXEC_STRINGS,       0x83f05000
+    .equ PATH_BUFFER,        0x83f07000
+    .equ CWD_BUFFER,         0x83f08000
+    .equ PARENT_PROCESS,     0x86000000
+    .equ PARENT_STACK,       0x87a00000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
 
@@ -81,12 +90,25 @@ image_loaded:
     sd      t3, 8(t2)              /* data */
     sd      t1, 16(t2)             /* length */
     sd      t1, 24(t2)             /* capacity */
+    addi    t2, t2, FILE_RECORD_SIZE
+    la      t3, exec_target_name
+    sd      t3, 0(t2)
+    la      t3, builtin_exec_elf
+    sd      t3, 8(t2)
+    la      t4, builtin_exec_elf_end
+    sub     t4, t4, t3
+    sd      t4, 16(t2)
+    sd      t4, 24(t2)
     la      t2, file_count
-    li      t3, 1
+    li      t3, 2
     sd      t3, 0(t2)
     la      t2, next_file_data
     li      t3, FILE_DATA
     sd      t3, 0(t2)
+    li      t0, CWD_BUFFER
+    li      t1, '/'
+    sb      t1, 0(t0)
+    sb      zero, 1(t0)
 
     /* Build argc/argv at user VA 0x07fff000 (PA 0x87fff000). */
     li      t0, 0x87fff000
@@ -134,13 +156,21 @@ image_loaded:
     li      t1, 0xcf
     sd      t1, 0(t0)              /* VA 0..2 MiB identity: finisher */
 
-    /* VA 0x600000 -> PA 0x80600000, user R/W/X. */
+    /* VA 0x600000..0x1fffffff -> PA 0x80600000..., user R/W/X. */
     li      t1, USER_PHYS
-    srli    t1, t1, 2
-    ori     t1, t1, 0xdf           /* V R W X U A D */
-    sd      t1, 24(t0)             /* level-1 index 3 */
+    addi    t0, t0, 24             /* level-1 index 3 */
+    li      t2, 13                 /* thirteen 2 MiB leaves */
+7:  srli    t3, t1, 2
+    ori     t3, t3, 0xdf           /* V R W X U A D */
+    sd      t3, 0(t0)
+    addi    t0, t0, 8
+    li      t3, 0x200000
+    add     t1, t1, t3
+    addi    t2, t2, -1
+    bnez    t2, 7b
 
     /* VA 0x07e00000 -> PA 0x87e00000, user stack. */
+    li      t0, LOW_PAGE_TABLE
     li      t1, USER_STACK_PHYS
     srli    t1, t1, 2
     ori     t1, t1, 0xd7           /* V R W U A D */
@@ -246,6 +276,24 @@ supervisor_trap:
     beq     a7, t0, syscall_read
     li      t0, 57                 /* Linux riscv64 close */
     beq     a7, t0, syscall_close
+    li      t0, 35                 /* Linux riscv64 unlinkat */
+    beq     a7, t0, syscall_unlinkat
+    li      t0, 48                 /* Linux riscv64 faccessat */
+    beq     a7, t0, syscall_faccessat
+    li      t0, 49                 /* Linux riscv64 chdir */
+    beq     a7, t0, syscall_chdir
+    li      t0, 53                 /* Linux riscv64 fchmodat */
+    beq     a7, t0, syscall_fchmodat
+    li      t0, 62                 /* Linux riscv64 lseek */
+    beq     a7, t0, syscall_lseek
+    li      t0, 214                /* Linux riscv64 brk */
+    beq     a7, t0, syscall_brk
+    li      t0, 220                /* Linux riscv64 clone */
+    beq     a7, t0, syscall_clone
+    li      t0, 221                /* Linux riscv64 execve */
+    beq     a7, t0, syscall_execve
+    li      t0, 260                /* Linux riscv64 wait4 */
+    beq     a7, t0, syscall_wait4
     li      t0, 93                 /* Linux riscv64 exit */
     beq     a7, t0, syscall_exit
     li      a0, -38                /* -ENOSYS */
@@ -277,16 +325,22 @@ syscall_bad_fd:
     j       trap_return
 
 syscall_openat:
-    mv      s0, a1                 /* pathname */
-    mv      s1, a2                 /* flags */
     mv      a0, a1
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    mv      s0, a0                 /* canonical pathname */
+    mv      s1, a2                 /* flags */
+    mv      a0, s0
     call    find_file
-    bnez    a0, 1f
-    beqz    s1, syscall_no_entry
+    beqz    a0, 1f
+    beqz    s1, 2f                 /* read-only open of existing file */
+    /* A writable open creates a new empty version of the same path. */
+1:  beqz    s1, syscall_no_entry
     mv      a0, s0
     call    create_file
     beqz    a0, syscall_no_space
-1:  mv      s2, a0                 /* file record */
+2:  mv      s2, a0                 /* file record */
     la      t0, next_fd
     ld      a0, 0(t0)
     addi    t1, a0, 1
@@ -385,14 +439,236 @@ syscall_close:
     li      a0, 0
     j       trap_return
 
+syscall_unlinkat:
+    mv      a0, a1
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    call    find_file
+    beqz    a0, syscall_no_entry
+    sd      zero, 0(a0)
+    li      a0, 0
+    j       trap_return
+
+syscall_faccessat:
+syscall_fchmodat:
+    mv      a0, a1
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    call    find_file
+    beqz    a0, syscall_no_entry
+    li      a0, 0
+    j       trap_return
+
+syscall_chdir:
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    mv      t1, a0
+    li      t0, CWD_BUFFER
+    call    copy_string
+    li      a0, 0
+    j       trap_return
+
+syscall_lseek:
+    li      t0, FD_TABLE
+    slli    t1, a0, 4
+    slli    t2, a0, 3
+    add     t1, t1, t2
+    add     t0, t0, t1
+    ld      t1, 0(t0)
+    beqz    t1, syscall_bad_fd
+    beqz    a2, 1f                 /* SEEK_SET */
+    li      t2, 1
+    beq     a2, t2, 2f             /* SEEK_CUR */
+    li      t2, 2
+    bne     a2, t2, syscall_invalid
+    ld      t2, 16(t1)             /* SEEK_END */
+    add     a1, t2, a1
+    j       1f
+2:  ld      t2, 8(t0)
+    add     a1, t2, a1
+1:  bltz    a1, syscall_invalid
+    sd      a1, 8(t0)
+    mv      a0, a1
+    j       trap_return
+
+syscall_brk:
+    la      t0, process_brk
+    beqz    a0, 1f
+    li      t1, USER_VIRT
+    bltu    a0, t1, 1f
+    li      t1, USER_HEAP_TOP
+    bgeu    a0, t1, 1f
+    sd      a0, 0(t0)
+1:  ld      a0, 0(t0)
+    j       trap_return
+
+syscall_clone:
+    la      t0, child_process
+    ld      t1, 0(t0)
+    bnez    t1, syscall_try_again
+
+    /* Preserve the parent trap frame and process control values. */
+    mv      t0, sp
+    li      t1, PARENT_FRAME
+    li      t2, 32
+1:  ld      t3, 0(t0)
+    sd      t3, 0(t1)
+    addi    t0, t0, 8
+    addi    t1, t1, 8
+    addi    t2, t2, -1
+    bnez    t2, 1b
+    csrr    t0, sepc
+    la      t1, parent_sepc
+    sd      t0, 0(t1)
+    csrr    t0, sscratch
+    la      t1, parent_user_sp
+    sd      t0, 0(t1)
+    la      t0, process_brk
+    ld      t0, 0(t0)
+    la      t1, parent_brk
+    sd      t0, 0(t1)
+    la      t0, next_fd
+    ld      t0, 0(t0)
+    la      t1, parent_next_fd
+    sd      t0, 0(t1)
+
+    /* Snapshot used process memory, the complete user stack, and fd table. */
+    la      t0, process_brk
+    ld      t2, 0(t0)
+    li      t0, USER_VIRT
+    sub     t2, t2, t0
+    addi    t2, t2, 7
+    srli    t2, t2, 3
+    la      t0, parent_process_words
+    sd      t2, 0(t0)
+    li      t0, USER_PHYS
+    li      t1, PARENT_PROCESS
+    call    copy_words
+    li      t0, USER_STACK_PHYS
+    li      t1, PARENT_STACK
+    li      t2, 0x40000            /* 2 MiB / 8 */
+    call    copy_words
+    li      t0, FD_TABLE
+    li      t1, PARENT_FDS
+    li      t2, 768                /* 256 records * 24 bytes / 8 */
+    call    copy_words
+
+    la      t0, child_process
+    li      t1, 1
+    sd      t1, 0(t0)
+    li      a0, 0                  /* child return */
+    j       trap_return
+
+syscall_execve:
+    mv      s1, a1                 /* argv */
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    mv      s0, a0                 /* canonical pathname */
+    call    find_file
+    beqz    a0, syscall_no_entry
+    ld      s2, 8(a0)              /* ELF image */
+    lwu     t0, 0(s2)
+    li      t1, 0x464c457f
+    bne     t0, t1, syscall_exec_format
+
+    /* Copy argv out of the old image before PT_LOAD overwrites it. */
+    li      t0, EXEC_ARGV
+    li      t1, EXEC_STRINGS
+    li      s4, 0
+1:  beqz    s1, 4f
+    ld      t2, 0(s1)
+    beqz    t2, 4f
+    li      t3, 31
+    bgeu    s4, t3, syscall_arg_too_big
+    sd      t1, 0(t0)
+2:  li      t3, EXEC_STRINGS + 0xc00
+    bgeu    t1, t3, syscall_arg_too_big
+    lbu     t3, 0(t2)
+    sb      t3, 0(t1)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    bnez    t3, 2b
+    addi    t0, t0, 8
+    addi    s1, s1, 8
+    addi    s4, s4, 1
+    j       1b
+4:
+    mv      a0, s2
+    call    load_elf
+    mv      s3, a0                 /* entry */
+
+    /* Construct argc/argv/envp in the top user-stack page. */
+    li      s0, 0x87fff000
+    sd      s4, 0(s0)
+    addi    s1, s0, 8              /* argv pointer slots */
+    li      s2, 0x87fff400          /* copied strings */
+    li      t0, EXEC_ARGV
+    li      t1, 0
+5:  bgeu    t1, s4, 6f
+    li      t2, 0x80000000
+    sub     t2, s2, t2             /* physical stack address -> user VA */
+    sd      t2, 0(s1)
+    ld      t2, 0(t0)
+    mv      t3, s2
+7:  lbu     t4, 0(t2)
+    sb      t4, 0(t3)
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    bnez    t4, 7b
+    mv      s2, t3
+    addi    s1, s1, 8
+    addi    t0, t0, 8
+    addi    t1, t1, 1
+    j       5b
+6:  sd      zero, 0(s1)            /* argv[argc] */
+    sd      zero, 8(s1)            /* envp[0] */
+    li      t0, USER_STACK_TOP - 4096
+    csrw    sscratch, t0
+    csrw    sepc, s3
+    li      a0, 0
+    j       trap_return
+
+syscall_exec_format:
+    li      a0, -8                 /* -ENOEXEC */
+    j       trap_return
+syscall_arg_too_big:
+    li      a0, -7                 /* -E2BIG */
+    j       trap_return
+
+syscall_wait4:
+    la      t0, child_process
+    ld      t0, 0(t0)
+    bnez    t0, syscall_try_again
+    beqz    a1, 1f
+    sd      zero, 0(a1)
+1:  li      a0, 1
+    j       trap_return
+
+syscall_try_again:
+    li      a0, -11                /* -EAGAIN */
+    j       trap_return
+
 syscall_no_entry:
     li      a0, -2                 /* -ENOENT */
     j       trap_return
 syscall_no_space:
     li      a0, -28                /* -ENOSPC */
     j       trap_return
+syscall_invalid:
+    li      a0, -22                /* -EINVAL */
+    j       trap_return
+syscall_name_too_long:
+    li      a0, -36                /* -ENAMETOOLONG */
+    j       trap_return
 
 syscall_exit:
+    la      t0, child_process
+    ld      t0, 0(t0)
+    bnez    t0, restore_parent
     la      t0, external_elf
     ld      t0, 0(t0)
     beqz    t0, syscall_exit_finish
@@ -417,6 +693,49 @@ syscall_exit_finish:
 1:  li      t1, 0x5555
     sw      t1, 0(t0)
     j       trap_halt
+
+restore_parent:
+    /* Restore shared process state before replacing the active trap frame. */
+    li      t0, PARENT_PROCESS
+    li      t1, USER_PHYS
+    la      t2, parent_process_words
+    ld      t2, 0(t2)
+    call    copy_words
+    li      t0, PARENT_STACK
+    li      t1, USER_STACK_PHYS
+    li      t2, 0x40000
+    call    copy_words
+    li      t0, PARENT_FDS
+    li      t1, FD_TABLE
+    li      t2, 768
+    call    copy_words
+    la      t0, parent_brk
+    ld      t1, 0(t0)
+    la      t0, process_brk
+    sd      t1, 0(t0)
+    la      t0, parent_next_fd
+    ld      t1, 0(t0)
+    la      t0, next_fd
+    sd      t1, 0(t0)
+    la      t0, parent_sepc
+    ld      t0, 0(t0)
+    csrw    sepc, t0
+    la      t0, parent_user_sp
+    ld      t0, 0(t0)
+    csrw    sscratch, t0
+    li      t0, PARENT_FRAME
+    mv      t1, sp
+    li      t2, 32
+1:  ld      t3, 0(t0)
+    sd      t3, 0(t1)
+    addi    t0, t0, 8
+    addi    t1, t1, 8
+    addi    t2, t2, -1
+    bnez    t2, 1b
+    la      t0, child_process
+    sd      zero, 0(t0)
+    li      a0, 1                  /* parent clone return */
+    j       trap_return
 
 trap_failure:
     li      t0, TEST_FINISHER
@@ -460,27 +779,90 @@ trap_return:
     csrrw   sp, sscratch, sp
     sret
 
-/* Load the first ELF64 PT_LOAD segment from ELF_SOURCE. */
+/* Load the test ELF and publish its entry point. */
 load_test_elf:
-    li      t0, ELF_SOURCE
-    ld      t1, 32(t0)             /* e_phoff */
-    add     t1, t1, t0
-    ld      t2, 8(t1)              /* p_offset */
-    add     t2, t2, t0
-    ld      t3, 16(t1)             /* p_vaddr */
-    ld      t4, 32(t1)             /* p_filesz */
-    li      t5, USER_PHYS - USER_VIRT
-    add     t5, t5, t3
-1:  beqz    t4, 2f
-    lbu     t6, 0(t2)
-    sb      t6, 0(t5)
-    addi    t2, t2, 1
-    addi    t5, t5, 1
-    addi    t4, t4, -1
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+    li      a0, ELF_SOURCE
+    call    load_elf
+    la      t0, user_entry_address
+    sd      a0, 0(t0)
+    ld      ra, 0(sp)
+    addi    sp, sp, 16
+    ret
+
+/* a0=ELF image, returns e_entry after loading every PT_LOAD segment. */
+load_elf:
+    addi    sp, sp, -64
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    sd      s3, 32(sp)
+    sd      s4, 40(sp)
+    sd      s5, 48(sp)
+    mv      s0, a0
+    li      s5, USER_VIRT
+    lhu     s1, 56(s0)             /* e_phnum */
+    lhu     s2, 54(s0)             /* e_phentsize */
+    ld      s3, 32(s0)             /* e_phoff */
+    add     s3, s3, s0
+1:  beqz    s1, 6f
+    lwu     t0, 0(s3)              /* p_type */
+    li      t1, 1                  /* PT_LOAD */
+    bne     t0, t1, 5f
+    ld      t0, 16(s3)             /* p_vaddr */
+    li      t1, USER_VIRT
+    bltu    t0, t1, trap_failure
+    li      t1, USER_HEAP_TOP
+    bgeu    t0, t1, trap_failure
+    li      t1, USER_PHYS - USER_VIRT
+    add     s4, t0, t1             /* physical destination */
+    ld      t0, 8(s3)              /* p_offset */
+    add     t0, t0, s0             /* source */
+    ld      t1, 32(s3)             /* p_filesz */
+    ld      t2, 40(s3)             /* p_memsz */
+    bltu    t2, t1, trap_failure
+    add     t3, s4, t2
+    bltu    t3, s4, trap_failure
+    li      t4, 0x82000000
+    bgtu    t3, t4, trap_failure
+    li      t4, USER_PHYS - USER_VIRT
+    sub     t5, t3, t4             /* virtual segment end */
+    bleu    t5, s5, 7f
+    mv      s5, t5
+7:
+    sub     t2, t2, t1             /* BSS bytes */
+2:  beqz    t1, 3f
+    lbu     t3, 0(t0)
+    sb      t3, 0(s4)
+    addi    t0, t0, 1
+    addi    s4, s4, 1
+    addi    t1, t1, -1
+    j       2b
+3:  beqz    t2, 5f
+4:  sb      zero, 0(s4)
+    addi    s4, s4, 1
+    addi    t2, t2, -1
+    bnez    t2, 4b
+5:  add     s3, s3, s2
+    addi    s1, s1, -1
     j       1b
-2:  ld      t1, 24(t0)             /* e_entry */
-    la      t2, user_entry_address
-    sd      t1, 0(t2)
+6:  li      t0, 4095
+    add     s5, s5, t0
+    li      t0, -4096
+    and     s5, s5, t0
+    la      t0, process_brk
+    sd      s5, 0(t0)
+    ld      a0, 24(s0)             /* e_entry */
+    ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    ld      s3, 32(sp)
+    ld      s4, 40(sp)
+    ld      s5, 48(sp)
+    addi    sp, sp, 64
     ret
 
 /* t0=destination, t1=NUL-terminated source */
@@ -504,6 +886,87 @@ kernel_puts:
     j       1b
 3:  ret
 
+/* t0=source, t1=destination, t2=64-bit word count */
+copy_words:
+1:  beqz    t2, 2f
+    ld      t3, 0(t0)
+    sd      t3, 0(t1)
+    addi    t0, t0, 8
+    addi    t1, t1, 8
+    addi    t2, t2, -1
+    j       1b
+2:  ret
+
+/* a0=input path, a1=destination; returns a canonical absolute path. */
+normalize_path:
+    mv      t1, a0
+    mv      t0, a1
+    mv      t6, a1
+    lbu     t2, 0(t1)
+    li      t3, '/'
+    beq     t2, t3, 2f
+    li      t4, CWD_BUFFER
+1:  lbu     t2, 0(t4)
+    beqz    t2, 3f
+    sb      t2, 0(t0)
+    addi    t0, t0, 1
+    addi    t4, t4, 1
+    j       1b
+2:  sb      t3, 0(t0)
+    addi    t0, t0, 1
+4:  addi    t1, t1, 1
+    lbu     t2, 0(t1)
+    beq     t2, t3, 4b
+3:
+    /* Skip separators, then classify dot components. */
+5:  lbu     t2, 0(t1)
+    beqz    t2, 12f
+    beq     t2, t3, 11f
+    li      t4, '.'
+    bne     t2, t4, 8f
+    lbu     t2, 1(t1)
+    beqz    t2, 6f
+    beq     t2, t3, 6f
+    bne     t2, t4, 8f
+    lbu     t2, 2(t1)
+    beqz    t2, 7f
+    bne     t2, t3, 8f
+7:  addi    t1, t1, 2              /* parent component */
+9:  addi    t4, t6, 1
+    bleu    t0, t4, 5b
+    addi    t0, t0, -1
+    lbu     t2, 0(t0)
+    li      t4, '/'
+    bne     t2, t4, 9b
+    j       5b
+6:  addi    t1, t1, 1              /* current component */
+    j       5b
+
+8:  addi    t4, t6, 1
+    bleu    t0, t4, 10f
+    li      t2, PATH_BUFFER + 4095
+    bgeu    t0, t2, 13f
+    li      t2, '/'
+    sb      t2, 0(t0)
+    addi    t0, t0, 1
+10: lbu     t2, 0(t1)
+    beqz    t2, 5b
+    li      t3, '/'
+    beq     t2, t3, 5b
+    li      t4, PATH_BUFFER + 4095
+    bgeu    t0, t4, 13f
+    sb      t2, 0(t0)
+    addi    t0, t0, 1
+    addi    t1, t1, 1
+    j       10b
+11: addi    t1, t1, 1
+    j       5b
+12: sb      zero, 0(t0)
+    mv      a0, t6
+    ret
+13: li      a0, 0
+    ret
+
 /* a0=path, returns the newest matching file record or zero. */
 find_file:
     addi    sp, sp, -32
@@ -521,6 +984,7 @@ find_file:
     add     s2, s2, t0
     mv      a0, s0
     ld      a1, 0(s2)
+    beqz    a1, 1b
     call    strings_equal
     beqz    a0, 1b
     mv      a0, s2
@@ -578,7 +1042,7 @@ create_file:
 
     la      t0, next_file_data
     ld      t1, 0(t0)
-    li      t2, 0x87c00000
+    li      t2, PARENT_PROCESS
     bgeu    t1, t2, 3f
     sd      t1, 8(s2)
     sd      zero, 16(s2)
@@ -731,25 +1195,186 @@ user_start:
     bne     a6, a0, user_register_failure
     li      a0, 64
     bne     a7, a0, user_register_failure
+
+    li      a0, 0
+    li      a7, 214
+    ecall
+    li      a1, 0x00800000
+    bne     a0, a1, user_register_failure
+    li      a0, 0x00900000
+    li      a7, 214
+    ecall
+    li      a1, 0x00900000
+    bne     a0, a1, user_register_failure
+    li      a0, 99
+    li      a1, 0
+    li      a2, 0
+    li      a7, 62
+    ecall
+    li      a1, -9
+    bne     a0, a1, user_register_failure
+
+    li      a0, -100
+    la      a1, user_input_name
+    li      a2, 0
+    li      a7, 56
+    ecall
+    li      a1, 4
+    bne     a0, a1, user_register_failure
+    li      a1, 0
+    li      a2, 0
+    li      a7, 62
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, 4
+    li      a7, 57
+    ecall
+    bnez    a0, user_register_failure
+
+    la      a0, user_chdir_name
+    li      a7, 49
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, -100
+    la      a1, user_create_name
+    li      a2, 577
+    li      a3, 384
+    li      a7, 56
+    ecall
+    li      a1, 5
+    bne     a0, a1, user_register_failure
+    li      a0, 5
+    li      a7, 57
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, -100
+    la      a1, user_relative_name
+    li      a2, 0
+    li      a3, 0
+    li      a7, 48
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, -100
+    la      a1, user_relative_name
+    li      a2, 384
+    li      a3, 0
+    li      a7, 53
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, -100
+    la      a1, user_relative_name
+    li      a2, 0
+    li      a7, 35
+    ecall
+    bnez    a0, user_register_failure
+    li      a0, -100
+    la      a1, user_relative_name
+    li      a2, 0
+    li      a3, 0
+    li      a7, 48
+    ecall
+    li      a1, -2
+    bne     a0, a1, user_register_failure
+
+    li      a0, 17
+    li      a1, 0
+    li      a2, 0
+    li      a3, 0
+    li      a4, 0
+    li      a7, 220
+    ecall
+    beqz    a0, user_clone_child
+    li      a1, 1
+    bne     a0, a1, user_register_failure
+    li      a0, 1
+    li      a1, 0
+    li      a2, 0
+    li      a3, 0
+    li      a7, 260
+    ecall
+    li      a1, 1
+    bne     a0, a1, user_register_failure
+
+    li      a0, 1
+    la      a1, user_success_message
+    la      a2, user_success_message_end
+    sub     a2, a2, a1
+    li      a7, 64
+    ecall
+
     li      a0, 0
     li      a7, 93
     ecall
+user_clone_child:
+    addi    sp, sp, -16
+    la      a0, user_exec_name
+    sd      a0, 0(sp)
+    sd      zero, 8(sp)
+    mv      a1, sp
+    li      a2, 0
+    li      a7, 221
+    ecall
+    j       user_register_failure
 user_register_failure:
     li      a0, 1
     li      a7, 93
     ecall
 user_message:
-    .ascii  "builder-hex0-riscv64 stage2 user ecall passed\n"
+    .ascii  "builder-hex0-riscv64 register context ecall\n"
 user_message_end:
+user_success_message:
+    .ascii  "builder-hex0-riscv64 stage2 user ecall passed\n"
+user_success_message_end:
+user_input_name:
+    .asciz  "/input"
+user_exec_name:
+    .asciz  "/exec-target"
+user_chdir_name:
+    .asciz  "/tmp/a/../work"
+user_create_name:
+    .asciz  "../work/./file"
+user_relative_name:
+    .asciz  "./file"
 user_end:
 
     .section .rodata
 process_name:    .asciz "hex0-seed"
 input_name:      .asciz "/input"
 output_name:     .asciz "/output"
+exec_target_name: .asciz "/exec-target"
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
+
+    .balign 8
+builtin_exec_elf:
+    .byte   0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0
+    .byte   0, 0, 0, 0, 0, 0, 0, 0
+    .half   2                      /* ET_EXEC */
+    .half   243                    /* EM_RISCV */
+    .word   1
+    .dword  0x00600078             /* e_entry */
+    .dword  64                     /* e_phoff */
+    .dword  0
+    .word   0
+    .half   64
+    .half   56
+    .half   1
+    .half   0
+    .half   0
+    .half   0
+    .word   1                      /* PT_LOAD */
+    .word   7                      /* PF_R | PF_W | PF_X */
+    .dword  0
+    .dword  0x00600000
+    .dword  0x00600000
+    .dword  builtin_exec_elf_end - builtin_exec_elf
+    .dword  builtin_exec_elf_end - builtin_exec_elf
+    .dword  4096
+    .word   0x00000513             /* li a0, 0 */
+    .word   0x05d00893             /* li a7, 93 */
+    .word   0x00000073             /* ecall */
+builtin_exec_elf_end:
     /* Keep the following data section contiguous in the raw image. */
     .balign 8
 
@@ -764,3 +1389,10 @@ output_length:      .dword 0
 file_count:         .dword 0
 next_file_name:     .dword 0
 next_file_data:     .dword FILE_DATA
+process_brk:        .dword 0x00800000
+child_process:      .dword 0
+parent_sepc:        .dword 0
+parent_user_sp:     .dword 0
+parent_brk:         .dword 0
+parent_next_fd:     .dword 0
+parent_process_words: .dword 0

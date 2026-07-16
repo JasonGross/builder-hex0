@@ -13,7 +13,7 @@ when it can execute the existing riscv64 stage0-posix inputs and persist the
 resulting `/dev/hda` image. Merely booting or running a custom payload is not a
 completion criterion.
 
-The first four stage-2 gates are implemented. M-mode establishes PMP and
+The first five stage-2 gates are implemented. M-mode establishes PMP and
 Sv39, then enters U-mode through an S-mode kernel. A privilege smoke test
 exercises Linux riscv64 `write` and `exit`; a second test loads and executes
 the existing 392-byte riscv64 stage0-posix `hex0-seed` at its linked virtual
@@ -21,8 +21,12 @@ address and checks a parser fixture. The third gives that seed the complete
 8,065-byte `hex0_riscv64.hex0` source and proves it reproduces its own ELF byte
 for byte. The fourth replaces the fixed input/output descriptors used during
 ABI bring-up with path lookup, a memory-file table, per-open offsets, and
-`close`. This is an executable ELF/ABI, memory-filesystem, and first
-self-hosting foundation, not yet the full builder environment.
+`close`. The fifth implements the complete syscall set observed in the
+riscv64 stage0-posix chain: `brk`, `clone`, `execve`, `wait4`, `exit`,
+`openat`, `close`, `read`, `write`, `lseek`, `unlinkat`, `fchmodat`,
+`faccessat`, and `chdir`. This is an executable ELF/ABI, process,
+memory-filesystem, and first self-hosting foundation, not yet the full builder
+environment because the shell and delayed disk flush remain pending.
 
 ## Machine interface
 
@@ -95,23 +99,27 @@ make test-riscv64-stage2-stage0-selfhost \
 The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
 and writes, legacy and modern virtio transports, and byte-identical
 self-building. Stage 1 also compiles the checked-in stage-2 hex0 and compares it
-with the independent assembler image. The stage-2 tests cover U-mode trap
-entry, execution of the real stage0-posix seed against a deterministic parser
-fixture, and byte-identical reconstruction of that seed from its canonical
-hex0 source.
+with the independent assembler image. The stage-2 tests cover complete U-mode
+register preservation, heap movement, descriptor and path operations,
+clone/exec/exit/wait sequencing, U-mode trap entry, execution of the real
+stage0-posix seed against a deterministic parser fixture, and byte-identical
+reconstruction of that seed from its canonical hex0 source.
 
 ## Stage-2 plan
 
-1. Port the internal shell, hex0 command, path handling, and memory filesystem.
-2. Port delayed `/dev/hda` flushing to the virtio block driver.
-3. Implement the Linux riscv64 syscall ABI: number in `a7`, arguments in
-   `a0..a5`, result in `a0`.
-4. Establish Sv39 process mappings, load fixed-address ELF64 little-endian
-   stage0 programs, construct their entry stack, and dispatch user `ecall`
-   traps in supervisor mode. This gate is complete for the first `hex0-seed`,
-   which is fixed at `0x600000`, below QEMU `virt` physical RAM; relocating it
-   is not a valid substitute.
-5. Build the riscv64 `hex0-seed`, continue through M2-Planet, and compare the
+1. **Complete:** implement the Linux riscv64 syscall ABI: number in `a7`,
+   arguments in `a0..a5`, result in `a0`.
+2. **Complete:** establish Sv39 process mappings, load fixed-address ELF64
+   little-endian stage0 programs, construct their entry stack, and dispatch
+   user `ecall` traps in supervisor mode. The loader walks every `PT_LOAD`
+   segment, copies its file bytes, zeroes BSS, and derives the initial break.
+3. **Complete:** provide lexical path normalization, memory-file records,
+   descriptor offsets, clone/exec/exit/wait process sequencing, and the exact
+   syscall surface used by stage0-posix.
+4. **Pending:** port the internal shell and hex0 command, then launch the first
+   user process from that shell instead of a test fixture.
+5. **Pending:** port delayed `/dev/hda` flushing to the virtio block driver.
+6. **Pending:** build the riscv64 `hex0-seed`, continue through M2-Planet, and compare the
    outputs with the existing native stage0-posix chain. The `hex0-seed`
    self-build is complete; the later tools remain pending.
 
@@ -157,8 +165,38 @@ hex0 source.
   `hex0_riscv64.hex0`, supplies an independent copy of the expected seed, and
   compares all 392 output bytes in the supervisor kernel before reporting
   success.
+- A single-process kernel still needs Unix fork semantics for the sequential
+  stage0 chain. `clone` therefore snapshots the parent trap frame, descriptor
+  table, heap break, process image, and 2 MiB user stack into reserved high
+  RAM. Child `exit` restores that snapshot and returns child PID 1 to the
+  parent; `wait4` then completes immediately. This intentionally supports one
+  child at a time and does not imply a scheduler.
+- File payloads grow upward from `0x83000000`; parent snapshots occupy
+  `0x86000000` and above. The file allocator is capped at the snapshot base so
+  user-controlled writes cannot corrupt process restoration state. User
+  virtual mappings cover `0x600000..0x1fffffff`, including the stage0 heap and
+  stack, while kernel scratch buffers remain outside that range.
+- `execve` first stages argument strings in kernel memory because loading the
+  next ELF may overwrite the caller's image. It then walks all ELF64
+  `PT_LOAD` headers, validates physical bounds, copies file-backed bytes,
+  zero-fills BSS, rebuilds `argc`/`argv`/`envp` below the user stack, and uses
+  the highest loaded address as the initial aligned break.
+- Paths are normalized lexically before lookup. Absolute and relative names,
+  repeated separators, `.`, and `..` therefore name the same record, while
+  deleted newest-first records are ignored. The smoke test changes directory,
+  accesses and changes mode through equivalent spellings, unlinks the file,
+  and verifies the subsequent lookup fails.
+- The syscall smoke test originally printed its success marker before its
+  final checks. Since the Make target only grepped that marker, a later
+  failure could be reported as success. The marker now follows every check,
+  including clone/exec/wait and path mutation.
+- The assembly-to-hex0 converter originally consumed every whitespace token
+  on an `objdump -s` line. When the ASCII rendering began with `64`, it treated
+  those characters as a fifth hex column and inserted a byte into the seed.
+  Both section converters now consume exactly the four documented byte
+  columns, and the byte-for-byte oracle caught and covers this case.
 - Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
-  handoff untested. It now has a 10,831-byte checked-in hex0 source. The
-  assembler oracle and stage-1-built output both produce the same 3,080-byte
+  handoff untested. It now has a 20,346-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 5,848-byte
   image (SHA-256
-  `0d6e190b0ff614549ad7e26f28f797a3e4529b9138f64cc39c12b4b0cca9e200`).
+  `cd44e0e1490bffd90f8e1b3626682709354797ede78260d6bf8a1102be128de1`).

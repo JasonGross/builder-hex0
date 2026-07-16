@@ -21,7 +21,9 @@ RAW_TEXT=${RAW_TEXT:-0}
         "$OBJDUMP" -s -j .text "$ELF" | awk '
             /^[[:space:]]*[0-9a-f]+[[:space:]]/ {
                 printf ""
-                for (i = 2; i <= NF; i++) {
+                # objdump emits exactly four hex columns followed by an ASCII
+                # rendering.  The rendering can itself start with hex digits.
+                for (i = 2; i <= 5 && i <= NF; i++) {
                     if ($i ~ /[^0-9a-f]/ || length($i) > 8 || length($i) % 2) break
                     for (j = 1; j <= length($i); j += 2) printf "%s ", substr($i, j, 2)
                 }
@@ -52,7 +54,9 @@ RAW_TEXT=${RAW_TEXT:-0}
     } | awk '
         /^[[:space:]]*[0-9a-f]+[[:space:]]/ {
             printf ""
-            for (i = 2; i <= NF; i++) {
+            # Do not mistake a hex-looking word in the ASCII rendering
+            # for a fifth byte column.
+            for (i = 2; i <= 5 && i <= NF; i++) {
                 if ($i ~ /[^0-9a-f]/ || length($i) > 8 || length($i) % 2) break
                 for (j = 1; j <= length($i); j += 2) printf "%s ", substr($i, j, 2)
             }
