@@ -30,6 +30,20 @@
 
 all: BUILD/builder-hex0-self-built.bin BUILD/builder-hex0-x86-stage1.img
 
+riscv64-stage1: BUILD/builder-hex0-riscv64-stage1.bin
+
+BUILD/builder-hex0-riscv64-stage1.bin: builder-hex0-riscv64-stage1.hex0 | BUILD
+	cut builder-hex0-riscv64-stage1.hex0 -f1 -d'#' | cut -f1 -d';' | xxd -r -p > $@
+
+riscv64-stage1-oracle: riscv64-stage1
+	./build-riscv64-stage1.sh
+	./riscv64-stage1-to-hex0.sh BUILD/builder-hex0-riscv64-stage1-oracle.elf BUILD/builder-hex0-riscv64-stage1-generated.hex0
+	diff builder-hex0-riscv64-stage1.hex0 BUILD/builder-hex0-riscv64-stage1-generated.hex0
+	cmp BUILD/builder-hex0-riscv64-stage1.bin BUILD/builder-hex0-riscv64-stage1-oracle.bin
+
+test-riscv64-stage1: riscv64-stage1-oracle
+	./test-riscv64-stage1.sh
+
 # The (full) builder-hex0 built by a (full) builder-hex0 (built by the mini builder)
 BUILD/builder-hex0-self-built.bin: BUILD/builder-hex0-mini-built.bin BUILD/builder-hex0.src build.sh | BUILD
 	echo "Build the (full) builder-hex0 by a (full) builder-hex0 (built by the mini builder)"
@@ -99,4 +113,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1

@@ -1,0 +1,5 @@
+# Mixed-case digits and both comment forms are intentional.
+00 11 Aa ff ; this comment is ignored
+22
+# A final unpaired nibble must not emit a byte.
+F
