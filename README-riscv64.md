@@ -116,7 +116,7 @@ make test-riscv64-stage2-chain \
 
 The focused emulator gates default to a 20-second limit. Set `TIMEOUT` to a
 larger value on a loaded emulation host; the canonical chain has a separate
-24-hour default because M0 and M2-Planet are substantially more expensive.
+five-minute default.
 
 The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
 and writes, legacy and modern virtio transports, and byte-identical
@@ -130,6 +130,11 @@ reconstruction of that seed from its canonical hex0 source.
 hex0 compilation, external ELF launch and return, exact `/dev/hda` length,
 delayed flushing, and both virtio-mmio transport versions. The chain gate uses
 the canonical stage0-posix sources rather than reduced fixtures.
+
+The canonical chain completes in 12.77 seconds on the validation host. Its
+in-guest M2-Planet is 361,701 bytes with SHA-256
+`cbc35afec2baef4a31b5875b0b3e08c4eb03d6974e0b57c7cd905e7244b92a17`,
+byte-identical to the independently produced native-chain artifact.
 
 ## Stage-2 plan
 
@@ -145,8 +150,8 @@ the canonical stage0-posix sources rather than reduced fixtures.
 4. **Complete:** port the internal shell and hex0 command, then launch the first
    user process from that shell instead of a test fixture.
 5. **Complete:** port delayed `/dev/hda` flushing to the virtio block driver.
-6. **Validation in progress:** build the canonical riscv64 stage0 sequence
-   through M2-Planet and compare its output with an independently produced
+6. **Complete:** build the canonical riscv64 stage0 sequence through M2-Planet
+   and compare its output byte for byte with an independently produced
    native-chain artifact.
 
 ## Design and bug log
@@ -222,10 +227,10 @@ the canonical stage0-posix sources rather than reduced fixtures.
   Both section converters now consume exactly the four documented byte
   columns, and the byte-for-byte oracle caught and covers this case.
 - Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
-  handoff untested. It now has a 33,106-byte checked-in hex0 source. The
-  assembler oracle and stage-1-built output both produce the same 9,560-byte
+  handoff untested. It now has a 33,986-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 9,816-byte
   image (SHA-256
-  `07175f678a6ea4bd57cc8732f6ee503e1faac79b300bd54be75e65a62a5b67b3`).
+  `ce245a0aa87c58251d6175d14042a38fe1412f4776fe65704e59561b445903b0`).
 - Shell process launch originally reused the shell's supervisor stack as the
   user-trap stack. The user trap frame then overwrote the suspended shell
   return address: the command exited successfully, but the shell hung while
@@ -249,7 +254,9 @@ the canonical stage0-posix sources rather than reduced fixtures.
   increased to 24 hours while the run was investigated. Live guest-memory
   inspection then showed that the output had frozen at 42,848 bytes and first
   diverged from the native artifact at byte 30,634. The input and M0 executable
-  were byte-identical to the native run; the differing state was M0's heap.
+  were byte-identical to the native run; the differing state was M0's heap. Once
+  the three trap causes below were fixed, the complete gate took 12.77 seconds,
+  so the final default is five minutes rather than a day.
 - The first `brk` implementation only moved the break. Unlike Linux, it did not
   zero newly exposed memory, so M0 reused bytes left by the earlier stage0
   executables as pointers, emitted corrupt hex2, and eventually trapped. The
@@ -265,3 +272,14 @@ the canonical stage0-posix sources rather than reduced fixtures.
   metadata. The focused fixture poisons the old root-table address, grows across
   it, verifies the corresponding user byte is zero, and continues through later
   syscalls to prove that the active tables are disjoint.
+- M2-Planet's output pass recursively walks a 131,132-node left-linked tree.
+  Its 24-byte frames require 3,147,168 bytes before the first leaf, exceeding
+  the initial 2 MiB user stack and trapping immediately after the 16-byte output
+  preamble. The user stack and clone snapshot are now 8 MiB each. File data is
+  capped below the stack, and the maximum process snapshot, stack snapshot, and
+  kernel stack occupy disjoint ranges. The focused user fixture recurses through
+  13,000 256-byte frames (3.17 MiB) before continuing its syscall checks.
+- Unexpected machine-mode traps previously fell through the reset-vector value
+  zero and consumed a host CPU indefinitely, making ABI faults look like slow
+  compilers. Stage 2 now installs an M-mode trap vector that prints `mcause`,
+  `mepc`, and `mtval`, then exits through the test finisher.

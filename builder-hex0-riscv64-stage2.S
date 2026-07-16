@@ -16,8 +16,9 @@
     .equ USER_PHYS,          0x80600000
     .equ USER_VIRT,          0x00600000
     .equ USER_HEAP_TOP,      0x02000000
-    .equ USER_STACK_PHYS,    0x87e00000
-    .equ USER_STACK_TOP,     0x08000000
+    .equ USER_STACK_PHYS,    0x85000000
+    .equ USER_STACK_TOP,     0x05800000
+    .equ USER_STACK_SIZE,    0x00800000
     .equ KERNEL_STACK_TOP,   0x87dff000
     .equ ELF_SOURCE,         0x82000000
     .equ INPUT_SOURCE,       0x82200000
@@ -33,6 +34,7 @@
     .equ VIRTIO_STATUS,      0x83803010
     .equ SECTOR_BUFFER,      0x83804000
     .equ FILE_DATA,          0x84000000
+    .equ FILE_DATA_TOP,      0x85000000
     .equ PARENT_FDS,         0x83f00000
     .equ PARENT_FRAME,       0x83f02000
     .equ EXEC_ARGV,          0x83f04000
@@ -41,14 +43,16 @@
     .equ CWD_BUFFER,         0x83f08000
     .equ SHELL_LINE_BUFFER,  0x83f09000
     .equ SHELL_TRAP_STACK,   0x83f0c000
-    .equ PARENT_PROCESS,     0x86000000
-    .equ PARENT_STACK,       0x87a00000
+    .equ PARENT_PROCESS,     0x85800000
+    .equ PARENT_STACK,       0x87200000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
     .equ SHELL_HEADER_MAGIC, 0x3256535244485842
 
 _start:
     li      sp, KERNEL_STACK_TOP
+    la      t0, machine_trap
+    csrw    mtvec, t0
     li      t0, UART0
     li      t1, 3
     sb      t1, 3(t0)              /* 8n1 */
@@ -169,26 +173,26 @@ init_filesystem_common:
     sb      t1, 0(t0)
     sb      zero, 1(t0)
 
-    /* Build argc/argv at user VA 0x07fff000 (PA 0x87fff000). */
-    li      t0, 0x87fff000
+    /* Build argc/argv in the top page of the user stack. */
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     li      t1, 3
     sd      t1, 0(t0)
-    li      t1, 0x07fff100
+    li      t1, USER_STACK_TOP - 4096 + 0x100
     sd      t1, 8(t0)
-    li      t1, 0x07fff110
+    li      t1, USER_STACK_TOP - 4096 + 0x110
     sd      t1, 16(t0)
-    li      t1, 0x07fff120
+    li      t1, USER_STACK_TOP - 4096 + 0x120
     sd      t1, 24(t0)
     sd      zero, 32(t0)
     sd      zero, 40(t0)
     la      t1, process_name
-    addi    t0, t0, 0x100
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x100
     call    copy_string
     la      t1, input_name
-    li      t0, 0x87fff110
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x110
     call    copy_string
     la      t1, output_name
-    li      t0, 0x87fff120
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x120
     call    copy_string
 
     /* Zero both page-table pages. */
@@ -228,14 +232,22 @@ init_filesystem_common:
     addi    t2, t2, -1
     bnez    t2, 7b
 
-    /* VA 0x07e00000 -> PA 0x87e00000, user stack. */
+    /* Map four 2 MiB leaves for the 8 MiB user stack. */
     li      t0, LOW_PAGE_TABLE
+    addi    t0, t0, 320             /* level-1 index 40 */
     li      t1, USER_STACK_PHYS
-    srli    t1, t1, 2
-    ori     t1, t1, 0xd7           /* V R W U A D */
-    sd      t1, 504(t0)            /* level-1 index 63 */
+    li      t2, USER_STACK_SIZE / 0x200000
+8:  srli    t3, t1, 2
+    ori     t3, t3, 0xd7            /* V R W U A D */
+    sd      t3, 0(t0)
+    addi    t0, t0, 8
+    li      t3, 0x200000
+    add     t1, t1, t3
+    addi    t2, t2, -1
+    bnez    t2, 8b
 
     /* VA 0x10000000 -> PA 0x10000000, supervisor MMIO. */
+    li      t0, LOW_PAGE_TABLE
     li      t1, UART0
     srli    t1, t1, 2
     ori     t1, t1, 0xcf
@@ -636,7 +648,7 @@ syscall_clone:
     call    copy_words
     li      t0, USER_STACK_PHYS
     li      t1, PARENT_STACK
-    li      t2, 0x40000            /* 2 MiB / 8 */
+    li      t2, USER_STACK_SIZE / 8
     call    copy_words
     li      t0, FD_TABLE
     li      t1, PARENT_FDS
@@ -689,10 +701,10 @@ syscall_execve:
     mv      s3, a0                 /* entry */
 
     /* Construct argc/argv/envp in the top user-stack page. */
-    li      s0, 0x87fff000
+    li      s0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     sd      s4, 0(s0)
     addi    s1, s0, 8              /* argv pointer slots */
-    li      s2, 0x87fff400          /* copied strings */
+    li      s2, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x400
     li      t0, EXEC_ARGV
     li      t1, 0
 5:  bgeu    t1, s4, 6f
@@ -808,7 +820,7 @@ restore_parent:
     call    copy_words
     li      t0, PARENT_STACK
     li      t1, USER_STACK_PHYS
-    li      t2, 0x40000
+    li      t2, USER_STACK_SIZE / 8
     call    copy_words
     li      t0, PARENT_FDS
     li      t1, FD_TABLE
@@ -848,6 +860,27 @@ trap_failure:
     sw      t1, 0(t0)
 trap_halt:
     wfi
+    j       trap_halt
+
+machine_trap:
+    li      sp, KERNEL_STACK_TOP - 4096
+    la      a0, machine_trap_message
+    call    kernel_puts
+    csrr    a0, mcause
+    call    kernel_puthex64
+    li      a0, 10
+    call    kernel_putc
+    csrr    a0, mepc
+    call    kernel_puthex64
+    li      a0, 10
+    call    kernel_putc
+    csrr    a0, mtval
+    call    kernel_puthex64
+    li      a0, 10
+    call    kernel_putc
+    li      t0, TEST_FINISHER
+    li      t1, 0x13333
+    sw      t1, 0(t0)
     j       trap_halt
 
 trap_return:
@@ -1355,7 +1388,7 @@ create_file:
 
     la      t0, next_file_data
     ld      t1, 0(t0)
-    li      t2, PARENT_PROCESS
+    li      t2, FILE_DATA_TOP
     bgeu    t1, t2, 3f
     sd      t1, 8(s2)
     sd      zero, 16(s2)
@@ -1732,7 +1765,7 @@ launch_shell_process:
     call    load_elf
     mv      s0, a0
 
-    li      t0, 0x87fff000
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     li      t1, 1
     la      t2, shell_argument_ptr
     ld      t2, 0(t2)
@@ -1741,9 +1774,9 @@ launch_shell_process:
     beqz    t3, 1f
     li      t1, 2
 1:  sd      t1, 0(t0)
-    li      t1, 0x07fff400
+    li      t1, USER_STACK_TOP - 4096 + 0x400
     sd      t1, 8(t0)
-    li      t3, 0x87fff400
+    li      t3, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x400
     la      t1, shell_command_ptr
     ld      t1, 0(t1)
     mv      t0, t3
@@ -1754,18 +1787,18 @@ launch_shell_process:
     beqz    t2, 2f
     lbu     t4, 0(t2)
     beqz    t4, 2f
-    li      t0, 0x87fff000
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     li      t1, 0x80000000
     sub     t1, t3, t1
     sd      t1, 16(t0)
     mv      t0, t3
     mv      t1, t2
     call    copy_string
-    li      t0, 0x87fff000
+    li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     sd      zero, 24(t0)
     sd      zero, 32(t0)
     j       3f
-2:  li      t0, 0x87fff000
+2:  li      t0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
     sd      zero, 16(t0)
     sd      zero, 24(t0)
 3:
@@ -2024,6 +2057,8 @@ user_start:
     li      a1, 0x01000000
     lbu     a2, 0(a1)
     bnez    a2, user_register_failure
+    li      a0, 13000
+    call    user_stack_probe
     li      a0, 99
     li      a1, 0
     li      a2, 0
@@ -2137,6 +2172,15 @@ user_register_failure:
     li      a0, 1
     li      a7, 93
     ecall
+user_stack_probe:
+    beqz    a0, 1f
+    addi    sp, sp, -256
+    sd      ra, 0(sp)
+    addi    a0, a0, -1
+    call    user_stack_probe
+    ld      ra, 0(sp)
+    addi    sp, sp, 256
+1:  ret
 user_message:
     .ascii  "builder-hex0-riscv64 register context ecall\n"
 user_message_end:
@@ -2168,6 +2212,7 @@ command_halt:     .asciz "halt"
 disk_failure_message: .asciz "builder-hex0-riscv64 disk request failed\n"
 shell_failure_message: .asciz "builder-hex0-riscv64 shell failed\n"
 shell_success_message: .asciz "builder-hex0-riscv64 shell and flush passed\n"
+machine_trap_message: .asciz "builder-hex0-riscv64 machine trap: mcause/mepc/mtval\n"
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
