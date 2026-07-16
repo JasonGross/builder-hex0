@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * RISC-V 64 builder-hex0 stage-2 privilege, paging, and ELF bring-up.
- * This proves the process address-space and ecall boundary.  Disk, filesystem,
- * and shell integration are added after this gate.
+ * RISC-V 64 builder-hex0 stage-2 kernel and internal builder shell.
  */
 
     .option norvc
@@ -11,6 +9,8 @@
 
     .equ UART0,              0x10000000
     .equ TEST_FINISHER,      0x00100000
+    .equ VIRTIO_FIRST,       0x10001000
+    .equ VIRTIO_END,         0x10009000
     .equ ROOT_PAGE_TABLE,    0x81000000
     .equ LOW_PAGE_TABLE,     0x81001000
     .equ USER_PHYS,          0x80600000
@@ -26,6 +26,12 @@
     .equ EXPECTED_LENGTH,    0x82800000
     .equ FILE_TABLE,         0x83000000
     .equ FD_TABLE,           0x83010000
+    .equ VIRTQ_DESC,         0x83800000
+    .equ VIRTQ_AVAIL,        0x83801000
+    .equ VIRTQ_USED,         0x83802000
+    .equ VIRTIO_HEADER,      0x83803000
+    .equ VIRTIO_STATUS,      0x83803010
+    .equ SECTOR_BUFFER,      0x83804000
     .equ FILE_DATA,          0x84000000
     .equ PARENT_FDS,         0x83f00000
     .equ PARENT_FRAME,       0x83f02000
@@ -33,16 +39,44 @@
     .equ EXEC_STRINGS,       0x83f05000
     .equ PATH_BUFFER,        0x83f07000
     .equ CWD_BUFFER,         0x83f08000
+    .equ SHELL_LINE_BUFFER,  0x83f09000
+    .equ SHELL_TRAP_STACK,   0x83f0c000
     .equ PARENT_PROCESS,     0x86000000
     .equ PARENT_STACK,       0x87a00000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
+    .equ SHELL_HEADER_MAGIC, 0x3256535244485842
 
 _start:
     li      sp, KERNEL_STACK_TOP
     li      t0, UART0
     li      t1, 3
     sb      t1, 3(t0)              /* 8n1 */
+
+    /* A valid block header selects the internal-shell boot path. */
+    call    virtio_init_optional
+    beqz    a0, 1f
+    li      a0, 0
+    li      a1, SECTOR_BUFFER
+    call    read_sector
+    li      t0, SECTOR_BUFFER
+    ld      t1, 0(t0)
+    li      t2, SHELL_HEADER_MAGIC
+    bne     t1, t2, 1f
+    la      t2, shell_mode
+    li      t3, 1
+    sd      t3, 0(t2)
+    ld      t1, 8(t0)
+    la      t2, shell_lba
+    sd      t1, 0(t2)
+    ld      t1, 16(t0)
+    la      t2, shell_remaining
+    sd      t1, 0(t2)
+1:
+
+    la      t0, shell_mode
+    ld      t0, 0(t0)
+    bnez    t0, load_shell
 
     /* Prefer an ELF supplied in reserved RAM; otherwise use the smoke fixture. */
     li      t0, ELF_SOURCE
@@ -53,6 +87,11 @@ _start:
     li      t0, 1
     la      t1, external_elf
     sd      t0, 0(t1)
+    j       image_loaded
+
+load_shell:
+    la      t0, user_entry_address
+    sd      zero, 0(t0)
     j       image_loaded
 
 load_smoke_fixture:
@@ -71,6 +110,10 @@ load_smoke_fixture:
     sd      t0, 0(t1)
 
 image_loaded:
+    la      t0, shell_mode
+    ld      t0, 0(t0)
+    bnez    t0, init_empty_filesystem
+
     /* Determine the NUL-terminated test input length. */
     li      t0, INPUT_SOURCE
     mv      t1, t0
@@ -102,6 +145,13 @@ image_loaded:
     la      t2, file_count
     li      t3, 2
     sd      t3, 0(t2)
+    j       init_filesystem_common
+
+init_empty_filesystem:
+    la      t2, file_count
+    sd      zero, 0(t2)
+
+init_filesystem_common:
     la      t2, next_file_data
     li      t3, FILE_DATA
     sd      t3, 0(t2)
@@ -224,8 +274,16 @@ supervisor_entry:
     li      t1, (1 << 5) | (1 << 18) /* SPIE | SUM */
     or      t0, t0, t1
     csrw    sstatus, t0
+    la      t0, shell_mode
+    ld      t0, 0(t0)
+    bnez    t0, supervisor_shell
     li      sp, USER_STACK_TOP - 4096
     sret
+
+supervisor_shell:
+    li      sp, KERNEL_STACK_TOP
+    call    internal_shell
+    j       syscall_exit_finish
 
 supervisor_trap:
     csrrw   sp, sscratch, sp
@@ -413,7 +471,17 @@ syscall_write_file:
     ld      t2, 16(t3)
     bleu    t1, t2, 3f
     sd      t1, 16(t3)
-3:
+3:  ld      t1, 8(t3)
+    ld      t2, 16(t3)
+    add     t1, t1, t2
+    addi    t1, t1, 15
+    li      t2, -16
+    and     t1, t1, t2
+    la      t2, next_file_data
+    ld      t4, 0(t2)
+    bleu    t1, t4, 4f
+    sd      t1, 0(t2)
+4:
     j       trap_return
 
 syscall_close:
@@ -644,7 +712,10 @@ syscall_wait4:
     ld      t0, 0(t0)
     bnez    t0, syscall_try_again
     beqz    a1, 1f
-    sd      zero, 0(a1)
+    la      t0, child_exit_status
+    ld      t0, 0(t0)
+    slli    t0, t0, 8
+    sw      t0, 0(a1)
 1:  li      a0, 1
     j       trap_return
 
@@ -669,6 +740,9 @@ syscall_exit:
     la      t0, child_process
     ld      t0, 0(t0)
     bnez    t0, restore_parent
+    la      t0, shell_process_active
+    ld      t1, 0(t0)
+    bnez    t1, restore_shell
     la      t0, external_elf
     ld      t0, 0(t0)
     beqz    t0, syscall_exit_finish
@@ -690,12 +764,24 @@ syscall_exit_finish:
     or      a0, a0, t1
     sw      a0, 0(t0)
     j       trap_halt
+
+restore_shell:
+    sd      zero, 0(t0)
+    mv      t2, a0
+    la      t0, shell_resume_sp
+    ld      sp, 0(t0)
+    la      t0, shell_resume_ra
+    ld      t0, 0(t0)
+    mv      a0, t2
+    jr      t0
 1:  li      t1, 0x5555
     sw      t1, 0(t0)
     j       trap_halt
 
 restore_parent:
     /* Restore shared process state before replacing the active trap frame. */
+    la      t0, child_exit_status
+    sd      a0, 0(t0)
     li      t0, PARENT_PROCESS
     li      t1, USER_PHYS
     la      t2, parent_process_words
@@ -778,6 +864,183 @@ trap_return:
     addi    sp, sp, 256
     csrrw   sp, sscratch, sp
     sret
+
+/* Optional virtio-mmio block device, split queue. */
+virtio_init_optional:
+    li      t0, VIRTIO_FIRST
+    li      t3, VIRTIO_END
+1:  bgeu    t0, t3, 9f
+    lw      t1, 0(t0)
+    li      t2, 0x74726976
+    bne     t1, t2, 8f
+    lw      t1, 8(t0)
+    li      t2, 2
+    beq     t1, t2, 2f
+8:  li      t4, 0x1000
+    add     t0, t0, t4
+    j       1b
+2:  la      t1, virtio_base
+    sd      t0, 0(t1)
+    sw      zero, 0x70(t0)
+    li      t1, 3
+    sw      t1, 0x70(t0)            /* ACKNOWLEDGE | DRIVER */
+    lw      t1, 4(t0)
+    li      t2, 1
+    beq     t1, t2, virtio_init_legacy
+    li      t2, 2
+    bne     t1, t2, 9f
+
+    li      t1, 1
+    sw      t1, 0x14(t0)
+    lw      t2, 0x10(t0)
+    andi    t2, t2, 1               /* VIRTIO_F_VERSION_1 */
+    beqz    t2, 9f
+    sw      t1, 0x24(t0)
+    sw      t2, 0x20(t0)
+    li      t1, 11
+    sw      t1, 0x70(t0)            /* + FEATURES_OK */
+    lw      t2, 0x70(t0)
+    andi    t2, t2, 8
+    beqz    t2, 9f
+    sw      zero, 0x30(t0)
+    lw      t2, 0x34(t0)
+    beqz    t2, 9f
+    li      t1, 8
+    bgeu    t1, t2, 3f
+    mv      t2, t1
+3:  sw      t2, 0x38(t0)
+    li      t1, VIRTQ_DESC
+    sw      t1, 0x80(t0)
+    sw      zero, 0x84(t0)
+    li      t1, VIRTQ_AVAIL
+    sw      t1, 0x90(t0)
+    sw      zero, 0x94(t0)
+    li      t1, VIRTQ_USED
+    sw      t1, 0xa0(t0)
+    sw      zero, 0xa4(t0)
+    li      t1, 1
+    sw      t1, 0x44(t0)
+    li      t1, 15
+    sw      t1, 0x70(t0)            /* + DRIVER_OK */
+    li      t0, VIRTQ_DESC
+    la      t1, virtq_desc
+    sd      t0, 0(t1)
+    li      t0, VIRTQ_AVAIL
+    la      t1, virtq_avail
+    sd      t0, 0(t1)
+    li      t0, VIRTQ_USED
+    la      t1, virtq_used
+    sd      t0, 0(t1)
+    li      a0, 1
+    ret
+
+virtio_init_legacy:
+    sw      zero, 0x24(t0)
+    sw      zero, 0x20(t0)
+    li      t1, 4096
+    sw      t1, 0x28(t0)
+    sw      zero, 0x30(t0)
+    lw      t2, 0x34(t0)
+    beqz    t2, 9f
+    li      t1, 8
+    bgeu    t1, t2, 4f
+    mv      t2, t1
+4:  sw      t2, 0x38(t0)
+    li      t1, 4096
+    sw      t1, 0x3c(t0)
+    li      t1, VIRTQ_DESC
+    srli    t1, t1, 12
+    sw      t1, 0x40(t0)
+    li      t1, 7
+    sw      t1, 0x70(t0)            /* + DRIVER_OK */
+    li      t0, VIRTQ_DESC
+    la      t1, virtq_desc
+    sd      t0, 0(t1)
+    li      t0, VIRTQ_DESC + 128
+    la      t1, virtq_avail
+    sd      t0, 0(t1)
+    li      t0, VIRTQ_DESC + 4096
+    la      t1, virtq_used
+    sd      t0, 0(t1)
+    li      a0, 1
+    ret
+9:  li      a0, 0
+    ret
+
+/* a0=sector, a1=buffer. */
+read_sector:
+    li      a2, 0
+    j       virtio_sector
+write_sector:
+    li      a2, 1
+virtio_sector:
+    li      t0, VIRTIO_HEADER
+    sw      a2, 0(t0)
+    sw      zero, 4(t0)
+    sd      a0, 8(t0)
+    li      t1, VIRTIO_STATUS
+    li      t2, 0xff
+    sb      t2, 0(t1)
+
+    la      t0, virtq_desc
+    ld      t0, 0(t0)
+    li      t1, VIRTIO_HEADER
+    sd      t1, 0(t0)
+    li      t1, 16
+    sw      t1, 8(t0)
+    li      t1, 1
+    sh      t1, 12(t0)              /* NEXT */
+    li      t1, 1
+    sh      t1, 14(t0)
+    sd      a1, 16(t0)
+    li      t1, 512
+    sw      t1, 24(t0)
+    li      t1, 1
+    bnez    a2, 5f
+    ori     t1, t1, 2               /* device writes on disk read */
+5:  sh      t1, 28(t0)
+    li      t1, 2
+    sh      t1, 30(t0)
+    li      t1, VIRTIO_STATUS
+    sd      t1, 32(t0)
+    li      t1, 1
+    sw      t1, 40(t0)
+    li      t1, 2
+    sh      t1, 44(t0)              /* WRITE */
+    sh      zero, 46(t0)
+
+    la      t0, virtq_avail
+    ld      t0, 0(t0)
+    lhu     t1, 2(t0)
+    andi    t2, t1, 7
+    slli    t2, t2, 1
+    addi    t2, t2, 4
+    add     t2, t2, t0
+    sh      zero, 0(t2)
+    addi    t1, t1, 1
+    fence   w, w
+    sh      t1, 2(t0)
+    fence   rw, rw
+
+    la      t0, virtq_used
+    ld      t0, 0(t0)
+    lhu     t1, 2(t0)
+    la      t2, virtio_base
+    ld      t2, 0(t2)
+    sw      zero, 0x50(t2)
+6:  fence   r, r
+    lhu     t2, 2(t0)
+    beq     t1, t2, 6b
+    li      t0, VIRTIO_STATUS
+    lbu     t1, 0(t0)
+    bnez    t1, disk_failure
+    ret
+
+disk_failure:
+    la      t0, disk_failure_message
+    call    kernel_puts
+    li      a0, 3
+    j       syscall_exit_finish
 
 /* Load the test ELF and publish its entry point. */
 load_test_elf:
@@ -872,6 +1135,37 @@ copy_string:
     addi    t0, t0, 1
     addi    t1, t1, 1
     bnez    t2, 1b
+    ret
+
+kernel_putc:
+    li      t0, UART0
+1:  lbu     t1, 5(t0)
+    andi    t1, t1, 0x20
+    beqz    t1, 1b
+    sb      a0, 0(t0)
+    ret
+
+kernel_puthex64:
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    mv      s0, a0
+    li      s1, 60
+1:  srl     t0, s0, s1
+    andi    t0, t0, 15
+    li      t1, 10
+    bltu    t0, t1, 2f
+    addi    a0, t0, 55
+    j       3f
+2:  addi    a0, t0, 48
+3:  call    kernel_putc
+    addi    s1, s1, -4
+    bgez    s1, 1b
+    ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    addi    sp, sp, 32
     ret
 
 kernel_puts:
@@ -1059,6 +1353,502 @@ create_file:
     ld      s1, 16(sp)
     ld      s2, 24(sp)
     addi    sp, sp, 32
+    ret
+
+/* Advance the file-data allocator past a0's payload. */
+finalize_file:
+    ld      t0, 8(a0)
+    ld      t1, 16(a0)
+    add     t0, t0, t1
+    addi    t0, t0, 15
+    li      t1, -16
+    and     t0, t0, t1
+    la      t1, next_file_data
+    ld      t2, 0(t1)
+    bleu    t0, t2, 1f
+    sd      t0, 0(t1)
+1:  ret
+
+/* Stream one command byte from the disk script; -1 marks exact-length EOF. */
+shell_getc:
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+    la      t0, shell_remaining
+    ld      t1, 0(t0)
+    beqz    t1, 3f
+    la      t2, shell_sector_pos
+    ld      t3, 0(t2)
+    li      t4, 512
+    bltu    t3, t4, 1f
+    la      t3, shell_lba
+    ld      a0, 0(t3)
+    li      a1, SECTOR_BUFFER
+    call    read_sector
+    la      t3, shell_lba
+    ld      t4, 0(t3)
+    addi    t4, t4, 1
+    sd      t4, 0(t3)
+    la      t2, shell_sector_pos
+    li      t3, 0
+1:  li      t4, SECTOR_BUFFER
+    add     t4, t4, t3
+    lbu     a0, 0(t4)
+    addi    t3, t3, 1
+    sd      t3, 0(t2)
+    la      t0, shell_remaining
+    ld      t1, 0(t0)
+    addi    t1, t1, -1
+    sd      t1, 0(t0)
+    j       4f
+3:  li      a0, -1
+4:  ld      ra, 0(sp)
+    addi    sp, sp, 16
+    ret
+
+/* Read one command line into the fixed 4 KiB buffer. */
+shell_getline:
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    li      s0, SHELL_LINE_BUFFER
+    mv      s1, s0
+1:  call    shell_getc
+    bltz    a0, 3f
+    li      t0, 10
+    beq     a0, t0, 2f
+    li      t0, SHELL_LINE_BUFFER + 4095
+    bgeu    s0, t0, 4f
+    sb      a0, 0(s0)
+    addi    s0, s0, 1
+    j       1b
+2:  sb      zero, 0(s0)
+    mv      a0, s1
+    j       5f
+3:  beq     s0, s1, 5f
+    sb      zero, 0(s0)
+    mv      a0, s1
+    j       5f
+4:  li      a0, -2
+5:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    addi    sp, sp, 32
+    ret
+
+/* a0=cursor; returns token in a0 and following cursor in a1. */
+next_token:
+1:  lbu     t0, 0(a0)
+    li      t1, ' '
+    beq     t0, t1, 2f
+    li      t1, 9
+    bne     t0, t1, 3f
+2:  addi    a0, a0, 1
+    j       1b
+3:  mv      a1, a0
+4:  lbu     t0, 0(a1)
+    beqz    t0, 6f
+    li      t1, ' '
+    beq     t0, t1, 5f
+    li      t1, 9
+    beq     t0, t1, 5f
+    addi    a1, a1, 1
+    j       4b
+5:  sb      zero, 0(a1)
+    addi    a1, a1, 1
+6:  ret
+
+/* a0=unsigned decimal string, returns value or -1 for malformed input. */
+parse_decimal:
+    mv      t0, a0
+    li      a0, 0
+    li      t3, 0
+1:  lbu     t1, 0(t0)
+    beqz    t1, 3f
+    li      t2, '0'
+    bltu    t1, t2, 4f
+    li      t2, '9' + 1
+    bgeu    t1, t2, 4f
+    addi    t1, t1, -48
+    slli    t2, a0, 3
+    slli    a0, a0, 1
+    add     a0, a0, t2
+    add     a0, a0, t1
+    addi    t0, t0, 1
+    li      t3, 1
+    j       1b
+3:  beqz    t3, 4f
+    ret
+4:  li      a0, -1
+    ret
+
+/* src N PATH */
+shell_src:
+    addi    sp, sp, -64
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    sd      s3, 32(sp)
+    sd      s4, 40(sp)
+    call    next_token
+    mv      s0, a1
+    call    parse_decimal
+    bltz    a0, 4f
+    mv      s1, a0
+    mv      a0, s0
+    call    next_token
+    lbu     t0, 0(a0)
+    beqz    t0, 4f
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, 4f
+    call    create_file
+    beqz    a0, 4f
+    mv      s2, a0
+    ld      t0, 24(s2)
+    bgtu    s1, t0, 4f
+    ld      s3, 8(s2)
+    mv      s4, s1
+1:  beqz    s4, 2f
+    call    shell_getc
+    bltz    a0, 4f
+    sb      a0, 0(s3)
+    addi    s3, s3, 1
+    addi    s4, s4, -1
+    j       1b
+2:  sd      s1, 16(s2)
+    mv      a0, s2
+    call    finalize_file
+    li      a0, 0
+    j       5f
+4:  li      a0, -1
+5:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    ld      s3, 32(sp)
+    ld      s4, 40(sp)
+    addi    sp, sp, 64
+    ret
+
+/* a0=source, a1=source bytes, a2=output; returns output bytes. */
+hex0_compile_memory:
+    mv      t0, a0
+    add     t1, a0, a1
+    mv      t2, a2
+    li      t3, 0
+    li      t4, 0
+    li      t5, 0
+1:  bgeu    t0, t1, 8f
+    lbu     a3, 0(t0)
+    addi    t0, t0, 1
+    beqz    t5, 3f
+    li      a4, 10
+    bne     a3, a4, 1b
+    li      t5, 0
+    j       1b
+3:  li      a4, '#'
+    beq     a3, a4, 7f
+    li      a4, ';'
+    beq     a3, a4, 7f
+    li      a4, '0'
+    bltu    a3, a4, 1b
+    li      a5, '9' + 1
+    bltu    a3, a5, 4f
+    li      a4, 'A'
+    bltu    a3, a4, 1b
+    li      a5, 'F' + 1
+    bltu    a3, a5, 5f
+    li      a4, 'a'
+    bltu    a3, a4, 1b
+    li      a5, 'f' + 1
+    bgeu    a3, a5, 1b
+    addi    a3, a3, -87
+    j       6f
+4:  addi    a3, a3, -48
+    j       6f
+5:  addi    a3, a3, -55
+6:  bnez    t3, 9f
+    slli    t4, a3, 4
+    li      t3, 1
+    j       1b
+9:  or      t4, t4, a3
+    sb      t4, 0(t2)
+    addi    t2, t2, 1
+    li      t3, 0
+    j       1b
+7:  li      t5, 1
+    j       1b
+8:  sub     a0, t2, a2
+    ret
+
+/* hex0 INPUT OUTPUT */
+shell_hex0:
+    addi    sp, sp, -48
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    call    next_token
+    mv      s0, a1
+    lbu     t0, 0(a0)
+    beqz    t0, 4f
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, 4f
+    call    find_file
+    beqz    a0, 4f
+    mv      s1, a0
+    mv      a0, s0
+    call    next_token
+    lbu     t0, 0(a0)
+    beqz    t0, 4f
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, 4f
+    call    create_file
+    beqz    a0, 4f
+    mv      s2, a0
+    ld      a0, 8(s1)
+    ld      a1, 16(s1)
+    ld      a2, 8(s2)
+    call    hex0_compile_memory
+    ld      t0, 24(s2)
+    bgtu    a0, t0, 4f
+    sd      a0, 16(s2)
+    mv      a0, s2
+    call    finalize_file
+    li      a0, 0
+    j       5f
+4:  li      a0, -1
+5:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    addi    sp, sp, 48
+    ret
+
+/* Write the newest /dev/hda memory file over the block device. */
+flush_disk:
+    addi    sp, sp, -64
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    sd      s3, 32(sp)
+    la      a0, dev_hda_name
+    call    find_file
+    beqz    a0, 5f
+    ld      s0, 8(a0)
+    ld      s1, 16(a0)
+    mv      a0, s1
+    call    kernel_puthex64
+    li      a0, 10
+    call    kernel_putc
+    li      s2, 0
+1:  beqz    s1, 4f
+    li      t0, SECTOR_BUFFER
+    li      t1, 64
+2:  sd      zero, 0(t0)
+    addi    t0, t0, 8
+    addi    t1, t1, -1
+    bnez    t1, 2b
+    li      s3, 512
+    bgeu    s1, s3, 3f
+    mv      s3, s1
+3:  mv      t0, s0
+    li      t1, SECTOR_BUFFER
+    mv      t2, s3
+6:  beqz    t2, 7f
+    lbu     t3, 0(t0)
+    sb      t3, 0(t1)
+    addi    t0, t0, 1
+    addi    t1, t1, 1
+    addi    t2, t2, -1
+    j       6b
+7:  mv      a0, s2
+    li      a1, SECTOR_BUFFER
+    call    write_sector
+    add     s0, s0, s3
+    sub     s1, s1, s3
+    addi    s2, s2, 1
+    j       1b
+4:  li      a0, 0
+    j       8f
+5:  li      a0, -1
+8:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    ld      s3, 32(sp)
+    addi    sp, sp, 64
+    ret
+
+shell_maybe_flush:
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+    la      t0, shell_flush_pending
+    ld      t1, 0(t0)
+    beqz    t1, 1f
+    sd      zero, 0(t0)
+    call    flush_disk
+    j       2f
+1:  li      a0, 0
+2:  ld      ra, 0(sp)
+    addi    sp, sp, 16
+    ret
+
+/* a0=file record, a1=argv[0], a2=optional argv[1]. Does not return normally. */
+launch_shell_process:
+    la      t0, shell_resume_sp
+    sd      sp, 0(t0)
+    la      t0, shell_resume_ra
+    sd      ra, 0(t0)
+    la      t0, shell_command_ptr
+    sd      a1, 0(t0)
+    la      t0, shell_argument_ptr
+    sd      a2, 0(t0)
+    ld      a0, 8(a0)
+    call    load_elf
+    mv      s0, a0
+
+    li      t0, 0x87fff000
+    li      t1, 1
+    la      t2, shell_argument_ptr
+    ld      t2, 0(t2)
+    beqz    t2, 1f
+    lbu     t3, 0(t2)
+    beqz    t3, 1f
+    li      t1, 2
+1:  sd      t1, 0(t0)
+    li      t1, 0x07fff400
+    sd      t1, 8(t0)
+    li      t3, 0x87fff400
+    la      t1, shell_command_ptr
+    ld      t1, 0(t1)
+    mv      t0, t3
+    call    copy_string
+    mv      t3, t0
+    la      t2, shell_argument_ptr
+    ld      t2, 0(t2)
+    beqz    t2, 2f
+    lbu     t4, 0(t2)
+    beqz    t4, 2f
+    li      t0, 0x87fff000
+    li      t1, 0x80000000
+    sub     t1, t3, t1
+    sd      t1, 16(t0)
+    mv      t0, t3
+    mv      t1, t2
+    call    copy_string
+    li      t0, 0x87fff000
+    sd      zero, 24(t0)
+    sd      zero, 32(t0)
+    j       3f
+2:  li      t0, 0x87fff000
+    sd      zero, 16(t0)
+    sd      zero, 24(t0)
+3:
+    la      t0, shell_process_active
+    li      t1, 1
+    sd      t1, 0(t0)
+    csrw    sepc, s0
+    csrr    t0, sstatus
+    li      t1, ~(1 << 8)
+    and     t0, t0, t1
+    li      t1, (1 << 5) | (1 << 18)
+    or      t0, t0, t1
+    csrw    sstatus, t0
+    li      t0, SHELL_TRAP_STACK
+    csrw    sscratch, t0
+    li      sp, USER_STACK_TOP - 4096
+    sret
+
+internal_shell:
+    addi    sp, sp, -64
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+1:  call    shell_getline
+    li      t0, -1
+    beq     a0, t0, shell_finish
+    bltz    a0, shell_error
+    call    next_token
+    mv      s0, a0
+    mv      s1, a1
+    lbu     t0, 0(s0)
+    beqz    t0, 1b
+
+    mv      a0, s0
+    la      a1, command_src
+    call    strings_equal
+    bnez    a0, shell_handle_src
+    mv      a0, s0
+    la      a1, command_hex0
+    call    strings_equal
+    bnez    a0, shell_handle_hex0
+    mv      a0, s0
+    la      a1, command_flush
+    call    strings_equal
+    bnez    a0, shell_handle_flush
+    mv      a0, s0
+    la      a1, command_halt
+    call    strings_equal
+    bnez    a0, shell_finish
+
+    /* An external command is completely buffered before a delayed flush. */
+    call    shell_maybe_flush
+    bnez    a0, shell_error
+    mv      a0, s0
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, shell_error
+    call    find_file
+    beqz    a0, shell_error
+    mv      s2, a0
+    mv      a0, s1
+    call    next_token
+    mv      a2, a0
+    mv      a1, s0
+    mv      a0, s2
+    call    launch_shell_process
+    j       1b                       /* resume target after process exit */
+
+shell_handle_src:
+    mv      a0, s1
+    call    shell_src
+    bnez    a0, shell_error
+    j       1b
+shell_handle_hex0:
+    mv      a0, s1
+    call    shell_hex0
+    bnez    a0, shell_error
+    j       1b
+shell_handle_flush:
+    la      t0, shell_flush_pending
+    li      t1, 1
+    sd      t1, 0(t0)
+    j       1b
+
+shell_finish:
+    call    flush_disk
+    bnez    a0, shell_error
+    la      t0, shell_success_message
+    call    kernel_puts
+    li      a0, 0
+    j       shell_return
+shell_error:
+    la      t0, shell_failure_message
+    call    kernel_puts
+    li      a0, 1
+shell_return:
+    ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    addi    sp, sp, 64
     ret
 
 validate_hex0_output:
@@ -1342,6 +2132,14 @@ process_name:    .asciz "hex0-seed"
 input_name:      .asciz "/input"
 output_name:     .asciz "/output"
 exec_target_name: .asciz "/exec-target"
+dev_hda_name:     .asciz "/dev/hda"
+command_src:      .asciz "src"
+command_hex0:     .asciz "hex0"
+command_flush:    .asciz "f"
+command_halt:     .asciz "halt"
+disk_failure_message: .asciz "builder-hex0-riscv64 disk request failed\n"
+shell_failure_message: .asciz "builder-hex0-riscv64 shell failed\n"
+shell_success_message: .asciz "builder-hex0-riscv64 shell and flush passed\n"
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
@@ -1391,8 +2189,23 @@ next_file_name:     .dword 0
 next_file_data:     .dword FILE_DATA
 process_brk:        .dword 0x00800000
 child_process:      .dword 0
+child_exit_status:  .dword 0
 parent_sepc:        .dword 0
 parent_user_sp:     .dword 0
 parent_brk:         .dword 0
 parent_next_fd:     .dword 0
 parent_process_words: .dword 0
+virtio_base:        .dword 0
+virtq_desc:         .dword 0
+virtq_avail:        .dword 0
+virtq_used:         .dword 0
+shell_mode:         .dword 0
+shell_lba:          .dword 0
+shell_remaining:    .dword 0
+shell_sector_pos:   .dword 512
+shell_flush_pending: .dword 0
+shell_process_active: .dword 0
+shell_resume_sp:    .dword 0
+shell_resume_ra:    .dword 0
+shell_command_ptr:  .dword 0
+shell_argument_ptr: .dword 0

@@ -2,6 +2,7 @@
 set -eu
 
 QEMU=${QEMU:-qemu-system-riscv64}
+TIMEOUT=${TIMEOUT:-20}
 
 write_u64_le()
 {
@@ -9,7 +10,7 @@ write_u64_le()
     count=0
     while [ "$count" -lt 8 ]; do
         octet=$(printf '%03o' "$((value & 255))")
-        printf "\\$octet"
+        printf '%b' "\\$octet"
         value=$((value >> 8))
         count=$((count + 1))
     done
@@ -40,7 +41,7 @@ run_builder()
     image=$1
     log=$2
     shift 2
-    timeout 20 "$QEMU" \
+    timeout "$TIMEOUT" "$QEMU" \
         -M virt -m 128M -smp 1 -nographic -bios none \
         -kernel BUILD/builder-hex0-riscv64-stage1.bin \
         -drive if=none,file="$image",format=raw,id=hd0 \

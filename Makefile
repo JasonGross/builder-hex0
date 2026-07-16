@@ -30,6 +30,7 @@
 
 QEMU ?= qemu-system-riscv64
 XXD ?= xxd
+TIMEOUT ?= 20
 
 all: BUILD/builder-hex0-self-built.bin BUILD/builder-hex0-x86-stage1.img
 
@@ -60,15 +61,23 @@ test-riscv64-stage1: riscv64-stage1-oracle riscv64-stage2-oracle
 
 test-riscv64-stage2:
 	./build-riscv64-stage2.sh
-	timeout 20 $(QEMU) -M virt -m 128M -smp 1 -nographic \
+	timeout $(TIMEOUT) $(QEMU) -M virt -m 128M -smp 1 -nographic \
 		-bios none -kernel BUILD/builder-hex0-riscv64-stage2.bin -no-reboot \
 		| tee BUILD/builder-hex0-riscv64-stage2.log
 	grep 'stage2 user ecall passed' BUILD/builder-hex0-riscv64-stage2.log
 
+test-riscv64-stage2-shell:
+	./build-riscv64-stage2.sh
+	./test-riscv64-stage2-shell.sh
+
+test-riscv64-stage2-chain:
+	./build-riscv64-stage2.sh
+	./test-riscv64-stage2-chain.sh
+
 test-riscv64-stage2-stage0:
 	test -n "$(STAGE0_HEX0_SEED)"
 	./build-riscv64-stage2.sh
-	timeout 20 $(QEMU) -M virt -m 128M -smp 1 -nographic \
+	timeout $(TIMEOUT) $(QEMU) -M virt -m 128M -smp 1 -nographic \
 		-bios none -kernel BUILD/builder-hex0-riscv64-stage2.bin -no-reboot \
 		-device loader,file=$(STAGE0_HEX0_SEED),addr=0x82000000,force-raw=on \
 		-device loader,file=test/hex0-parser.hex0,addr=0x82200000,force-raw=on \
@@ -79,7 +88,7 @@ test-riscv64-stage2-stage0-selfhost:
 	test -n "$(STAGE0_HEX0_SEED)"
 	test -n "$(STAGE0_HEX0_SOURCE)"
 	./build-riscv64-stage2.sh
-	timeout 20 $(QEMU) -M virt -m 128M -smp 1 -nographic \
+	timeout $(TIMEOUT) $(QEMU) -M virt -m 128M -smp 1 -nographic \
 		-bios none -kernel BUILD/builder-hex0-riscv64-stage2.bin -no-reboot \
 		-device loader,file=$(STAGE0_HEX0_SEED),addr=0x82000000,force-raw=on \
 		-device loader,file=$(STAGE0_HEX0_SOURCE),addr=0x82200000,force-raw=on \
@@ -157,4 +166,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-shell test-riscv64-stage2-chain test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost
