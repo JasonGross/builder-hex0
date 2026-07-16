@@ -11,8 +11,8 @@
     .equ TEST_FINISHER,      0x00100000
     .equ VIRTIO_FIRST,       0x10001000
     .equ VIRTIO_END,         0x10009000
-    .equ ROOT_PAGE_TABLE,    0x81000000
-    .equ LOW_PAGE_TABLE,     0x81001000
+    .equ ROOT_PAGE_TABLE,    0x82a00000
+    .equ LOW_PAGE_TABLE,     0x82a01000
     .equ USER_PHYS,          0x80600000
     .equ USER_VIRT,          0x00600000
     .equ USER_HEAP_TOP,      0x02000000
@@ -145,6 +145,15 @@ image_loaded:
     la      t2, file_count
     li      t3, 2
     sd      t3, 0(t2)
+
+    /* Prove that brk growth clears RAM left dirty by an earlier process. */
+    li      t0, 0x80800000
+    li      t1, 0x5a
+    sb      t1, 0(t0)
+    li      t0, 0x808fffff
+    sb      t1, 0(t0)
+    li      t0, 0x81000000
+    sb      t1, 0(t0)
     j       init_filesystem_common
 
 init_empty_filesystem:
@@ -564,13 +573,23 @@ syscall_lseek:
 
 syscall_brk:
     la      t0, process_brk
-    beqz    a0, 1f
+    beqz    a0, 3f
     li      t1, USER_VIRT
-    bltu    a0, t1, 1f
+    bltu    a0, t1, 3f
     li      t1, USER_HEAP_TOP
-    bgeu    a0, t1, 1f
+    bgeu    a0, t1, 3f
+    ld      t2, 0(t0)
+    bleu    a0, t2, 2f
+    li      t3, USER_PHYS - USER_VIRT
+    add     t2, t2, t3
+    add     t3, a0, t3
+1:  bgeu    t2, t3, 2f
+    sb      zero, 0(t2)
+    addi    t2, t2, 1
+    j       1b
+2:
     sd      a0, 0(t0)
-1:  ld      a0, 0(t0)
+3:  ld      a0, 0(t0)
     j       trap_return
 
 syscall_clone:
@@ -1991,11 +2010,20 @@ user_start:
     ecall
     li      a1, 0x00800000
     bne     a0, a1, user_register_failure
-    li      a0, 0x00900000
+    li      a0, 0x01100000
     li      a7, 214
     ecall
-    li      a1, 0x00900000
+    li      a1, 0x01100000
     bne     a0, a1, user_register_failure
+    li      a1, 0x00800000
+    lbu     a2, 0(a1)
+    bnez    a2, user_register_failure
+    li      a1, 0x008fffff
+    lbu     a2, 0(a1)
+    bnez    a2, user_register_failure
+    li      a1, 0x01000000
+    lbu     a2, 0(a1)
+    bnez    a2, user_register_failure
     li      a0, 99
     li      a1, 0
     li      a2, 0

@@ -222,10 +222,10 @@ the canonical stage0-posix sources rather than reduced fixtures.
   Both section converters now consume exactly the four documented byte
   columns, and the byte-for-byte oracle caught and covers this case.
 - Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
-  handoff untested. It now has a 20,346-byte checked-in hex0 source. The
-  assembler oracle and stage-1-built output both produce the same 5,848-byte
+  handoff untested. It now has a 33,106-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 9,560-byte
   image (SHA-256
-  `cd44e0e1490bffd90f8e1b3626682709354797ede78260d6bf8a1102be128de1`).
+  `07175f678a6ea4bd57cc8732f6ee503e1faac79b300bd54be75e65a62a5b67b3`).
 - Shell process launch originally reused the shell's supervisor stack as the
   user-trap stack. The user trap frame then overwrote the suspended shell
   return address: the command exited successfully, but the shell hung while
@@ -245,6 +245,23 @@ the canonical stage0-posix sources rather than reduced fixtures.
   wall clock after emitting its success marker. The gates retain 20 seconds as
   their default but now honor a `TIMEOUT` override.
 - The full-chain harness initially defaulted to eight hours. The canonical run
-  remained healthy and CPU-bound in M0 at 7 hours 57 minutes, before it could
-  compile the C compiler or M2-Planet. Its separate default is now 24 hours;
-  focused test limits remain unchanged.
+  remained CPU-bound in M0 beyond that limit, so its separate default was
+  increased to 24 hours while the run was investigated. Live guest-memory
+  inspection then showed that the output had frozen at 42,848 bytes and first
+  diverged from the native artifact at byte 30,634. The input and M0 executable
+  were byte-identical to the native run; the differing state was M0's heap.
+- The first `brk` implementation only moved the break. Unlike Linux, it did not
+  zero newly exposed memory, so M0 reused bytes left by the earlier stage0
+  executables as pointers, emitted corrupt hex2, and eventually trapped. The
+  syscall now zeroes exactly the range added when the break grows. The focused
+  user fixture poisons representative addresses in the future heap before entry
+  and verifies that `brk` clears them, covering the cross-executable state that
+  the single-program seed gates did not exercise.
+- Once zero-fill let M0 complete, M2-Planet grew its break through virtual
+  `0x01000000`. That address mapped to physical `0x81000000`, where the initial
+  layout had placed the root and level-1 page tables; clearing the new heap
+  correctly destroyed the mapping and exposed the collision. Both tables now
+  live at `0x82a00000`, above the user arena's physical end and below filesystem
+  metadata. The focused fixture poisons the old root-table address, grows across
+  it, verifies the corresponding user byte is zero, and continues through later
+  syscalls to prove that the active tables are disjoint.
