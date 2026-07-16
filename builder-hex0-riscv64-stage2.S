@@ -23,6 +23,11 @@
     .equ OUTPUT_FILE,        0x82400000
     .equ EXPECTED_SOURCE,    0x82600000
     .equ EXPECTED_LENGTH,    0x82800000
+    .equ FILE_TABLE,         0x83000000
+    .equ FD_TABLE,           0x83010000
+    .equ FILE_DATA,          0x84000000
+    .equ FILE_RECORD_SIZE,   32
+    .equ FD_RECORD_SIZE,     24
 
 _start:
     li      sp, KERNEL_STACK_TOP
@@ -67,6 +72,21 @@ image_loaded:
 5:  sub     t1, t1, t0
     la      t2, input_length
     sd      t1, 0(t2)
+
+    /* Seed the memory filesystem with the test's read-only /input file. */
+    li      t2, FILE_TABLE
+    la      t3, input_name
+    sd      t3, 0(t2)              /* name */
+    li      t3, INPUT_SOURCE
+    sd      t3, 8(t2)              /* data */
+    sd      t1, 16(t2)             /* length */
+    sd      t1, 24(t2)             /* capacity */
+    la      t2, file_count
+    li      t3, 1
+    sd      t3, 0(t2)
+    la      t2, next_file_data
+    li      t3, FILE_DATA
+    sd      t3, 0(t2)
 
     /* Build argc/argv at user VA 0x07fff000 (PA 0x87fff000). */
     li      t0, 0x87fff000
@@ -224,18 +244,19 @@ supervisor_trap:
     beq     a7, t0, syscall_openat
     li      t0, 63                 /* Linux riscv64 read */
     beq     a7, t0, syscall_read
+    li      t0, 57                 /* Linux riscv64 close */
+    beq     a7, t0, syscall_close
     li      t0, 93                 /* Linux riscv64 exit */
     beq     a7, t0, syscall_exit
     li      a0, -38                /* -ENOSYS */
     j       trap_return
 
 syscall_write:
-    li      t0, 5
-    beq     a0, t0, syscall_write_file
     li      t0, 1
     beq     a0, t0, 1f
     li      t0, 2
-    bne     a0, t0, syscall_bad_fd
+    beq     a0, t0, 1f
+    j       syscall_write_file
 1:  mv      t0, a1
     mv      t1, a2
     li      a0, 0
@@ -256,24 +277,45 @@ syscall_bad_fd:
     j       trap_return
 
 syscall_openat:
+    mv      s0, a1                 /* pathname */
+    mv      s1, a2                 /* flags */
+    mv      a0, a1
+    call    find_file
+    bnez    a0, 1f
+    beqz    s1, syscall_no_entry
+    mv      a0, s0
+    call    create_file
+    beqz    a0, syscall_no_space
+1:  mv      s2, a0                 /* file record */
     la      t0, next_fd
     ld      a0, 0(t0)
     addi    t1, a0, 1
     sd      t1, 0(t0)
+    li      t0, FD_TABLE
+    slli    t1, a0, 4
+    slli    t2, a0, 3
+    add     t1, t1, t2
+    add     t0, t0, t1
+    sd      s2, 0(t0)
+    sd      zero, 8(t0)
+    sd      s1, 16(t0)
     j       trap_return
 
 syscall_read:
-    li      t0, 4
-    bne     a0, t0, syscall_bad_fd
-    la      t0, input_offset
-    ld      t1, 0(t0)
-    la      t2, input_length
-    ld      t2, 0(t2)
+    li      t0, FD_TABLE
+    slli    t1, a0, 4
+    slli    t2, a0, 3
+    add     t1, t1, t2
+    add     t0, t0, t1
+    ld      t3, 0(t0)              /* file record */
+    beqz    t3, syscall_bad_fd
+    ld      t1, 8(t0)              /* offset */
+    ld      t2, 16(t3)             /* file length */
     bgeu    t1, t2, syscall_read_eof
     sub     t2, t2, t1
     bleu    a2, t2, 1f
     mv      a2, t2
-1:  li      t2, INPUT_SOURCE
+1:  ld      t2, 8(t3)              /* file data */
     add     t2, t2, t1
     mv      a0, a2
 2:  beqz    a2, 3f
@@ -284,16 +326,25 @@ syscall_read:
     addi    a2, a2, -1
     addi    t1, t1, 1
     j       2b
-3:  sd      t1, 0(t0)
+3:  sd      t1, 8(t0)
     j       trap_return
 syscall_read_eof:
     li      a0, 0
     j       trap_return
 
 syscall_write_file:
-    la      t0, output_length
-    ld      t1, 0(t0)
-    li      t2, OUTPUT_FILE
+    li      t0, FD_TABLE
+    slli    t1, a0, 4
+    slli    t2, a0, 3
+    add     t1, t1, t2
+    add     t0, t0, t1
+    ld      t3, 0(t0)              /* file record */
+    beqz    t3, syscall_bad_fd
+    ld      t1, 8(t0)              /* offset */
+    ld      t2, 24(t3)             /* capacity */
+    sub     t2, t2, t1
+    bgtu    a2, t2, syscall_no_space
+    ld      t2, 8(t3)              /* file data */
     add     t2, t2, t1
     mv      a0, a2
 1:  beqz    a2, 2f
@@ -304,7 +355,41 @@ syscall_write_file:
     addi    a2, a2, -1
     addi    t1, t1, 1
     j       1b
-2:  sd      t1, 0(t0)
+2:  sd      t1, 8(t0)
+    ld      t2, 16(t3)
+    bleu    t1, t2, 3f
+    sd      t1, 16(t3)
+3:
+    j       trap_return
+
+syscall_close:
+    li      t0, FD_TABLE
+    slli    t1, a0, 4
+    slli    t2, a0, 3
+    add     t1, t1, t2
+    add     t0, t0, t1
+    ld      t1, 0(t0)
+    beqz    t1, syscall_bad_fd
+    ld      t2, 8(t1)
+    ld      t3, 16(t1)
+    add     t2, t2, t3
+    addi    t2, t2, 15
+    li      t3, -16
+    and     t2, t2, t3
+    la      t3, next_file_data
+    ld      t4, 0(t3)
+    bleu    t2, t4, 1f
+    sd      t2, 0(t3)
+1:
+    sd      zero, 0(t0)
+    li      a0, 0
+    j       trap_return
+
+syscall_no_entry:
+    li      a0, -2                 /* -ENOENT */
+    j       trap_return
+syscall_no_space:
+    li      a0, -28                /* -ENOSPC */
     j       trap_return
 
 syscall_exit:
@@ -419,14 +504,113 @@ kernel_puts:
     j       1b
 3:  ret
 
+/* a0=path, returns the newest matching file record or zero. */
+find_file:
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    mv      s0, a0
+    la      t0, file_count
+    ld      s1, 0(t0)
+1:  beqz    s1, 3f
+    addi    s1, s1, -1
+    slli    t0, s1, 5
+    li      s2, FILE_TABLE
+    add     s2, s2, t0
+    mv      a0, s0
+    ld      a1, 0(s2)
+    call    strings_equal
+    beqz    a0, 1b
+    mv      a0, s2
+    j       4f
+3:  li      a0, 0
+4:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    addi    sp, sp, 32
+    ret
+
+/* a0/a1=NUL-terminated strings, returns one when equal. */
+strings_equal:
+1:  lbu     t0, 0(a0)
+    lbu     t1, 0(a1)
+    bne     t0, t1, 2f
+    beqz    t0, 3f
+    addi    a0, a0, 1
+    addi    a1, a1, 1
+    j       1b
+2:  li      a0, 0
+    ret
+3:  li      a0, 1
+    ret
+
+/* a0=path, returns a new empty file record or zero. */
+create_file:
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      s1, 16(sp)
+    sd      s2, 24(sp)
+    mv      s0, a0
+    la      t0, file_count
+    ld      s1, 0(t0)
+    li      t1, 256
+    bgeu    s1, t1, 3f
+    slli    t1, s1, 5
+    li      s2, FILE_TABLE
+    add     s2, s2, t1
+
+    la      t1, next_file_name
+    ld      t0, 0(t1)
+    beqz    t0, 1f
+    j       2f
+1:  li      t0, 0x83100000
+2:  sd      t0, 0(s2)
+4:  lbu     t2, 0(s0)
+    sb      t2, 0(t0)
+    addi    s0, s0, 1
+    addi    t0, t0, 1
+    bnez    t2, 4b
+    sd      t0, 0(t1)
+
+    la      t0, next_file_data
+    ld      t1, 0(t0)
+    li      t2, 0x87c00000
+    bgeu    t1, t2, 3f
+    sd      t1, 8(s2)
+    sd      zero, 16(s2)
+    sub     t2, t2, t1
+    sd      t2, 24(s2)
+    addi    s1, s1, 1
+    la      t0, file_count
+    sd      s1, 0(t0)
+    mv      a0, s2
+    j       5f
+3:  li      a0, 0
+5:  ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    ld      s1, 16(sp)
+    ld      s2, 24(sp)
+    addi    sp, sp, 32
+    ret
+
 validate_hex0_output:
-    la      t0, output_length
-    ld      t0, 0(t0)
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    la      a0, output_name
+    call    find_file
+    beqz    a0, validate_output_failure
+    mv      s0, a0
+    ld      t0, 16(s0)
     li      t1, EXPECTED_LENGTH
     ld      t1, 0(t1)
     beqz    t1, validate_parser_fixture
     bne     t0, t1, validate_output_failure
-    li      t0, OUTPUT_FILE
+    ld      t0, 8(s0)
     li      t2, EXPECTED_SOURCE
 1:  beqz    t1, validate_output_success
     lbu     t3, 0(t0)
@@ -440,15 +624,19 @@ validate_hex0_output:
 validate_parser_fixture:
     li      t1, 5
     bne     t0, t1, validate_output_failure
-    li      t0, OUTPUT_FILE
+    ld      t0, 8(s0)
     ld      t1, 0(t0)
     li      t2, 0x22ffaa1100
     bne     t1, t2, validate_output_failure
 validate_output_success:
     li      a0, 0
-    ret
+    j       validate_output_return
 validate_output_failure:
     li      a0, 1
+validate_output_return:
+    ld      ra, 0(sp)
+    ld      s0, 8(sp)
+    addi    sp, sp, 16
     ret
 
 /* Position-independent user fixture copied to virtual 0x600000. */
@@ -573,3 +761,6 @@ next_fd:            .dword 4
 input_offset:       .dword 0
 input_length:       .dword 0
 output_length:      .dword 0
+file_count:         .dword 0
+next_file_name:     .dword 0
+next_file_data:     .dword FILE_DATA

@@ -13,14 +13,16 @@ when it can execute the existing riscv64 stage0-posix inputs and persist the
 resulting `/dev/hda` image. Merely booting or running a custom payload is not a
 completion criterion.
 
-The first three stage-2 gates are implemented. M-mode establishes PMP and
+The first four stage-2 gates are implemented. M-mode establishes PMP and
 Sv39, then enters U-mode through an S-mode kernel. A privilege smoke test
 exercises Linux riscv64 `write` and `exit`; a second test loads and executes
 the existing 392-byte riscv64 stage0-posix `hex0-seed` at its linked virtual
 address and checks a parser fixture. The third gives that seed the complete
 8,065-byte `hex0_riscv64.hex0` source and proves it reproduces its own ELF byte
-for byte. This is an executable ELF/ABI and first self-hosting foundation, not
-yet the full builder environment.
+for byte. The fourth replaces the fixed input/output descriptors used during
+ABI bring-up with path lookup, a memory-file table, per-open offsets, and
+`close`. This is an executable ELF/ABI, memory-filesystem, and first
+self-hosting foundation, not yet the full builder environment.
 
 ## Machine interface
 
@@ -143,17 +145,20 @@ hex0 source.
   `0x600000`, outside QEMU `virt` RAM. Stage 2 now reads the ELF64 program
   header, maps the load address with Sv39, constructs `argc`/`argv`, and enters
   at ELF `e_entry`.
-- The real seed gate deliberately uses a small in-memory file shim for
-  `/input` and `/output`. This proves the ELF loader and Linux syscall ABI
-  before those paths are connected to the builder memory filesystem; it is
-  not counted as completion of the shell or persistence work.
+- The real seed gate initially used hard-coded descriptor numbers and buffers
+  for `/input` and `/output`. That proved the ELF loader but was not a usable
+  filesystem contract. Stage 2 now resolves paths through newest-first file
+  records, allocates per-open descriptors with independent offsets, bounds
+  writes by available RAM, and finalizes the data bump pointer on `close`.
+  The test input is merely the first read-only file seeded into that table.
+  The shell and persistence work remain separate completion gates.
 - A five-byte parser fixture was useful for ABI bring-up but did not prove the
   compiler against its real source. The self-host gate now loads
   `hex0_riscv64.hex0`, supplies an independent copy of the expected seed, and
   compares all 392 output bytes in the supervisor kernel before reporting
   success.
 - Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
-  handoff untested. It now has an 8,270-byte checked-in hex0 source. The
-  assembler oracle and stage-1-built output both produce the same 2,336-byte
+  handoff untested. It now has a 10,831-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 3,080-byte
   image (SHA-256
-  `c2595146c61ccd1ca04e97b02b7a6baa738c4d295202279e341f6a4f77b7f57d`).
+  `0d6e190b0ff614549ad7e26f28f797a3e4529b9138f64cc39c12b4b0cca9e200`).
