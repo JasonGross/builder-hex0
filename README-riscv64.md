@@ -86,7 +86,8 @@ Build the checked-in hex0 seed:
 make riscv64-stage1
 ```
 
-The independent oracle additionally requires a riscv64 GNU binutils toolchain:
+The independent oracle additionally requires a riscv64 GNU binutils toolchain
+and `xxd` (override its path with `make XXD=/path/to/xxd`):
 
 ```sh
 make riscv64-stage1-oracle
@@ -99,7 +100,8 @@ an executable specification and review aid; the checked-in hex0 is the seed.
 The stage-2 oracle does the same for `builder-hex0-riscv64-stage2.S` and its
 checked-in hex0 image.
 
-Run the emulator tests with:
+The emulator tests require `qemu-system-riscv64`. Override its path with
+`make QEMU=/path/to/qemu-system-riscv64` when it is not on `PATH`:
 
 ```sh
 make test-riscv64-stage1
