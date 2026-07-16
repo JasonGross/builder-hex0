@@ -132,6 +132,12 @@ hex0 source.
   RISC-V deliberately blocks S-mode data access to U pages unless
   `sstatus.SUM` is set. Enabling SUM at supervisor entry fixed the trap and the
   test now proves U-mode `write` followed by `exit` through the S-mode handler.
+- The initial trap frame saved only the temporary and argument registers used
+  by `hex0-seed`. That was sufficient for the first gate but violated the
+  process ABI as soon as the kernel grew enough to use saved registers itself.
+  The frame now preserves every user integer register except `a0`, which holds
+  the syscall result, and `sp`, which remains in `sscratch`. The U-mode smoke
+  fixture primes and verifies all preserved register classes across `write`.
 - A stage-2 test that copied the seed to convenient physical RAM would not
   validate its actual contract: the existing ELF is linked at virtual
   `0x600000`, outside QEMU `virt` RAM. Stage 2 now reads the ELF64 program
@@ -147,7 +153,7 @@ hex0 source.
   compares all 392 output bytes in the supervisor kernel before reporting
   success.
 - Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
-  handoff untested. It now has a 6,565-byte checked-in hex0 source. The
-  assembler oracle and stage-1-built output both produce the same 1,840-byte
+  handoff untested. It now has an 8,270-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 2,336-byte
   image (SHA-256
-  `190a8adfc0959e9b7a7c23c9c6d83b9aa5f4ee8fd04c718f3310bbb28137e9b1`).
+  `c2595146c61ccd1ca04e97b02b7a6baa738c4d295202279e341f6a4f77b7f57d`).

@@ -179,19 +179,37 @@ supervisor_entry:
 
 supervisor_trap:
     csrrw   sp, sscratch, sp
-    addi    sp, sp, -128
+    addi    sp, sp, -256
     sd      ra, 0(sp)
-    sd      t0, 8(sp)
-    sd      t1, 16(sp)
-    sd      t2, 24(sp)
-    sd      a0, 32(sp)
-    sd      a1, 40(sp)
-    sd      a2, 48(sp)
-    sd      a3, 56(sp)
-    sd      a4, 64(sp)
-    sd      a5, 72(sp)
-    sd      a6, 80(sp)
-    sd      a7, 88(sp)
+    sd      gp, 8(sp)
+    sd      tp, 16(sp)
+    sd      t0, 24(sp)
+    sd      t1, 32(sp)
+    sd      t2, 40(sp)
+    sd      s0, 48(sp)
+    sd      s1, 56(sp)
+    sd      a0, 64(sp)
+    sd      a1, 72(sp)
+    sd      a2, 80(sp)
+    sd      a3, 88(sp)
+    sd      a4, 96(sp)
+    sd      a5, 104(sp)
+    sd      a6, 112(sp)
+    sd      a7, 120(sp)
+    sd      s2, 128(sp)
+    sd      s3, 136(sp)
+    sd      s4, 144(sp)
+    sd      s5, 152(sp)
+    sd      s6, 160(sp)
+    sd      s7, 168(sp)
+    sd      s8, 176(sp)
+    sd      s9, 184(sp)
+    sd      s10, 192(sp)
+    sd      s11, 200(sp)
+    sd      t3, 208(sp)
+    sd      t4, 216(sp)
+    sd      t5, 224(sp)
+    sd      t6, 232(sp)
 
     csrr    t0, scause
     li      t1, 8                  /* ecall from U mode */
@@ -325,17 +343,35 @@ trap_halt:
 
 trap_return:
     ld      ra, 0(sp)
-    ld      t0, 8(sp)
-    ld      t1, 16(sp)
-    ld      t2, 24(sp)
-    ld      a1, 40(sp)
-    ld      a2, 48(sp)
-    ld      a3, 56(sp)
-    ld      a4, 64(sp)
-    ld      a5, 72(sp)
-    ld      a6, 80(sp)
-    ld      a7, 88(sp)
-    addi    sp, sp, 128
+    ld      gp, 8(sp)
+    ld      tp, 16(sp)
+    ld      t0, 24(sp)
+    ld      t1, 32(sp)
+    ld      t2, 40(sp)
+    ld      s0, 48(sp)
+    ld      s1, 56(sp)
+    ld      a1, 72(sp)
+    ld      a2, 80(sp)
+    ld      a3, 88(sp)
+    ld      a4, 96(sp)
+    ld      a5, 104(sp)
+    ld      a6, 112(sp)
+    ld      a7, 120(sp)
+    ld      s2, 128(sp)
+    ld      s3, 136(sp)
+    ld      s4, 144(sp)
+    ld      s5, 152(sp)
+    ld      s6, 160(sp)
+    ld      s7, 168(sp)
+    ld      s8, 176(sp)
+    ld      s9, 184(sp)
+    ld      s10, 192(sp)
+    ld      s11, 200(sp)
+    ld      t3, 208(sp)
+    ld      t4, 216(sp)
+    ld      t5, 224(sp)
+    ld      t6, 232(sp)
+    addi    sp, sp, 256
     csrrw   sp, sscratch, sp
     sret
 
@@ -417,13 +453,101 @@ validate_output_failure:
 
 /* Position-independent user fixture copied to virtual 0x600000. */
 user_start:
+    li      gp, 3
+    li      tp, 4
+    li      t0, 5
+    li      t1, 6
+    li      t2, 7
+    li      s0, 8
+    li      s1, 9
+    li      s2, 18
+    li      s3, 19
+    li      s4, 20
+    li      s5, 21
+    li      s6, 22
+    li      s7, 23
+    li      s8, 24
+    li      s9, 25
+    li      s10, 26
+    li      s11, 27
+    li      t3, 28
+    li      t4, 29
+    li      t5, 30
+    li      t6, 31
     li      a0, 1
     la      a1, user_message
     la      a2, user_message_end
     sub     a2, a2, a1
+    li      a3, 13
+    li      a4, 14
+    li      a5, 15
+    li      a6, 16
     li      a7, 64
     ecall
+
+    li      a0, 3
+    bne     gp, a0, user_register_failure
+    li      a0, 4
+    bne     tp, a0, user_register_failure
+    li      a0, 5
+    bne     t0, a0, user_register_failure
+    li      a0, 6
+    bne     t1, a0, user_register_failure
+    li      a0, 7
+    bne     t2, a0, user_register_failure
+    li      a0, 8
+    bne     s0, a0, user_register_failure
+    li      a0, 9
+    bne     s1, a0, user_register_failure
+    li      a0, 18
+    bne     s2, a0, user_register_failure
+    li      a0, 19
+    bne     s3, a0, user_register_failure
+    li      a0, 20
+    bne     s4, a0, user_register_failure
+    li      a0, 21
+    bne     s5, a0, user_register_failure
+    li      a0, 22
+    bne     s6, a0, user_register_failure
+    li      a0, 23
+    bne     s7, a0, user_register_failure
+    li      a0, 24
+    bne     s8, a0, user_register_failure
+    li      a0, 25
+    bne     s9, a0, user_register_failure
+    li      a0, 26
+    bne     s10, a0, user_register_failure
+    li      a0, 27
+    bne     s11, a0, user_register_failure
+    li      a0, 28
+    bne     t3, a0, user_register_failure
+    li      a0, 29
+    bne     t4, a0, user_register_failure
+    li      a0, 30
+    bne     t5, a0, user_register_failure
+    li      a0, 31
+    bne     t6, a0, user_register_failure
+    la      a0, user_message
+    bne     a1, a0, user_register_failure
+    la      a0, user_message_end
+    la      a1, user_message
+    sub     a0, a0, a1
+    bne     a2, a0, user_register_failure
+    li      a0, 13
+    bne     a3, a0, user_register_failure
+    li      a0, 14
+    bne     a4, a0, user_register_failure
+    li      a0, 15
+    bne     a5, a0, user_register_failure
+    li      a0, 16
+    bne     a6, a0, user_register_failure
+    li      a0, 64
+    bne     a7, a0, user_register_failure
     li      a0, 0
+    li      a7, 93
+    ecall
+user_register_failure:
+    li      a0, 1
     li      a7, 93
     ecall
 user_message:
