@@ -13,6 +13,11 @@ when it can execute the existing riscv64 stage0-posix inputs and persist the
 resulting `/dev/hda` image. Merely booting or running a custom payload is not a
 completion criterion.
 
+The first stage-2 gate is implemented: M-mode establishes PMP and Sv39,
+enters U-mode through an S-mode kernel, and handles Linux riscv64 `write` and
+`exit` ecalls from a process at virtual address `0x600000`. It is an executable
+paging/syscall foundation, not yet the full builder environment.
+
 ## Machine interface
 
 The reference platform is QEMU `virt`, one hart, 128 MiB or more of RAM, and a
@@ -103,3 +108,7 @@ writes, legacy and modern virtio transports, and byte-identical self-building.
   local eight-descriptor allocation. It now uses `min(device_max, 8)`.
 - A bring-up fixture accidentally wrote its source-LBA word twice. The test
   harness now checks that every generated control block is exactly 32 bytes.
+- The first supervisor syscall handler faulted while reading a user buffer.
+  RISC-V deliberately blocks S-mode data access to U pages unless
+  `sstatus.SUM` is set. Enabling SUM at supervisor entry fixed the trap and the
+  test now proves U-mode `write` followed by `exit` through the S-mode handler.

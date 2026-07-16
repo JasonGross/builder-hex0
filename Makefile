@@ -28,6 +28,8 @@
 # The "full" builder takes .src files which are primitive shell scripts and
 # can build itself and other compilers.
 
+QEMU ?= qemu-system-riscv64
+
 all: BUILD/builder-hex0-self-built.bin BUILD/builder-hex0-x86-stage1.img
 
 riscv64-stage1: BUILD/builder-hex0-riscv64-stage1.bin
@@ -43,6 +45,13 @@ riscv64-stage1-oracle: riscv64-stage1
 
 test-riscv64-stage1: riscv64-stage1-oracle
 	./test-riscv64-stage1.sh
+
+test-riscv64-stage2:
+	./build-riscv64-stage2.sh
+	timeout 20 $(QEMU) -M virt -m 128M -smp 1 -nographic \
+		-bios none -kernel BUILD/builder-hex0-riscv64-stage2.bin -no-reboot \
+		| tee BUILD/builder-hex0-riscv64-stage2.log
+	grep 'stage2 user ecall passed' BUILD/builder-hex0-riscv64-stage2.log
 
 # The (full) builder-hex0 built by a (full) builder-hex0 (built by the mini builder)
 BUILD/builder-hex0-self-built.bin: BUILD/builder-hex0-mini-built.bin BUILD/builder-hex0.src build.sh | BUILD
@@ -113,4 +122,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1 test-riscv64-stage2
