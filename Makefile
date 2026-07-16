@@ -53,6 +53,16 @@ test-riscv64-stage2:
 		| tee BUILD/builder-hex0-riscv64-stage2.log
 	grep 'stage2 user ecall passed' BUILD/builder-hex0-riscv64-stage2.log
 
+test-riscv64-stage2-stage0:
+	test -n "$(STAGE0_HEX0_SEED)"
+	./build-riscv64-stage2.sh
+	timeout 20 $(QEMU) -M virt -m 128M -smp 1 -nographic \
+		-bios none -kernel BUILD/builder-hex0-riscv64-stage2.bin -no-reboot \
+		-device loader,file=$(STAGE0_HEX0_SEED),addr=0x82000000,force-raw=on \
+		-device loader,file=test/hex0-parser.hex0,addr=0x82200000,force-raw=on \
+		| tee BUILD/builder-hex0-riscv64-stage2-stage0.log
+	grep 'real stage0 hex0-seed passed' BUILD/builder-hex0-riscv64-stage2-stage0.log
+
 # The (full) builder-hex0 built by a (full) builder-hex0 (built by the mini builder)
 BUILD/builder-hex0-self-built.bin: BUILD/builder-hex0-mini-built.bin BUILD/builder-hex0.src build.sh | BUILD
 	echo "Build the (full) builder-hex0 by a (full) builder-hex0 (built by the mini builder)"
@@ -122,4 +132,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1 test-riscv64-stage2
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-stage0

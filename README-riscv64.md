@@ -13,10 +13,13 @@ when it can execute the existing riscv64 stage0-posix inputs and persist the
 resulting `/dev/hda` image. Merely booting or running a custom payload is not a
 completion criterion.
 
-The first stage-2 gate is implemented: M-mode establishes PMP and Sv39,
-enters U-mode through an S-mode kernel, and handles Linux riscv64 `write` and
-`exit` ecalls from a process at virtual address `0x600000`. It is an executable
-paging/syscall foundation, not yet the full builder environment.
+The first two stage-2 gates are implemented. M-mode establishes PMP and Sv39,
+then enters U-mode through an S-mode kernel. A privilege smoke test exercises
+Linux riscv64 `write` and `exit`; a second test loads and executes the existing
+392-byte riscv64 stage0-posix `hex0-seed` at its linked virtual address,
+services its `openat`, `read`, `write`, and `exit` calls, and checks the emitted
+bytes. This is an executable ELF/ABI foundation, not yet the full builder
+environment.
 
 ## Machine interface
 
@@ -75,10 +78,15 @@ Run the emulator tests with:
 
 ```sh
 make test-riscv64-stage1
+make test-riscv64-stage2
+make test-riscv64-stage2-stage0 \
+  STAGE0_HEX0_SEED=/path/to/riscv64/hex0-seed
 ```
 
-The tests cover mixed-case digits, both comment syntaxes, sector reads and
-writes, legacy and modern virtio transports, and byte-identical self-building.
+The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
+and writes, legacy and modern virtio transports, and byte-identical
+self-building. The stage-2 tests cover U-mode trap entry and execution of the
+real stage0-posix seed against a deterministic input/output fixture.
 
 ## Stage-2 plan
 
@@ -88,8 +96,9 @@ writes, legacy and modern virtio transports, and byte-identical self-building.
    `a0..a5`, result in `a0`.
 4. Establish Sv39 process mappings, load fixed-address ELF64 little-endian
    stage0 programs, construct their entry stack, and dispatch user `ecall`
-   traps in supervisor mode. The first stage0 seed is fixed at `0x600000`,
-   below QEMU `virt` physical RAM, so relocating it is not a valid substitute.
+   traps in supervisor mode. This gate is complete for the first `hex0-seed`,
+   which is fixed at `0x600000`, below QEMU `virt` physical RAM; relocating it
+   is not a valid substitute.
 5. Build the riscv64 `hex0-seed`, continue through M2-Planet, and compare the
    outputs with the existing native stage0-posix chain.
 
@@ -112,3 +121,12 @@ writes, legacy and modern virtio transports, and byte-identical self-building.
   RISC-V deliberately blocks S-mode data access to U pages unless
   `sstatus.SUM` is set. Enabling SUM at supervisor entry fixed the trap and the
   test now proves U-mode `write` followed by `exit` through the S-mode handler.
+- A stage-2 test that copied the seed to convenient physical RAM would not
+  validate its actual contract: the existing ELF is linked at virtual
+  `0x600000`, outside QEMU `virt` RAM. Stage 2 now reads the ELF64 program
+  header, maps the load address with Sv39, constructs `argc`/`argv`, and enters
+  at ELF `e_entry`.
+- The real seed gate deliberately uses a small in-memory file shim for
+  `/input` and `/output`. This proves the ELF loader and Linux syscall ABI
+  before those paths are connected to the builder memory filesystem; it is
+  not counted as completion of the shell or persistence work.
