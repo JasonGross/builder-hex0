@@ -13,13 +13,14 @@ when it can execute the existing riscv64 stage0-posix inputs and persist the
 resulting `/dev/hda` image. Merely booting or running a custom payload is not a
 completion criterion.
 
-The first two stage-2 gates are implemented. M-mode establishes PMP and Sv39,
-then enters U-mode through an S-mode kernel. A privilege smoke test exercises
-Linux riscv64 `write` and `exit`; a second test loads and executes the existing
-392-byte riscv64 stage0-posix `hex0-seed` at its linked virtual address,
-services its `openat`, `read`, `write`, and `exit` calls, and checks the emitted
-bytes. This is an executable ELF/ABI foundation, not yet the full builder
-environment.
+The first three stage-2 gates are implemented. M-mode establishes PMP and
+Sv39, then enters U-mode through an S-mode kernel. A privilege smoke test
+exercises Linux riscv64 `write` and `exit`; a second test loads and executes
+the existing 392-byte riscv64 stage0-posix `hex0-seed` at its linked virtual
+address and checks a parser fixture. The third gives that seed the complete
+8,065-byte `hex0_riscv64.hex0` source and proves it reproduces its own ELF byte
+for byte. This is an executable ELF/ABI and first self-hosting foundation, not
+yet the full builder environment.
 
 ## Machine interface
 
@@ -81,12 +82,16 @@ make test-riscv64-stage1
 make test-riscv64-stage2
 make test-riscv64-stage2-stage0 \
   STAGE0_HEX0_SEED=/path/to/riscv64/hex0-seed
+make test-riscv64-stage2-stage0-selfhost \
+  STAGE0_HEX0_SEED=/path/to/riscv64/hex0-seed \
+  STAGE0_HEX0_SOURCE=/path/to/riscv64/hex0_riscv64.hex0
 ```
 
 The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
 and writes, legacy and modern virtio transports, and byte-identical
-self-building. The stage-2 tests cover U-mode trap entry and execution of the
-real stage0-posix seed against a deterministic input/output fixture.
+self-building. The stage-2 tests cover U-mode trap entry, execution of the
+real stage0-posix seed against a deterministic parser fixture, and
+byte-identical reconstruction of that seed from its canonical hex0 source.
 
 ## Stage-2 plan
 
@@ -100,7 +105,8 @@ real stage0-posix seed against a deterministic input/output fixture.
    which is fixed at `0x600000`, below QEMU `virt` physical RAM; relocating it
    is not a valid substitute.
 5. Build the riscv64 `hex0-seed`, continue through M2-Planet, and compare the
-   outputs with the existing native stage0-posix chain.
+   outputs with the existing native stage0-posix chain. The `hex0-seed`
+   self-build is complete; the later tools remain pending.
 
 ## Design and bug log
 
@@ -130,3 +136,8 @@ real stage0-posix seed against a deterministic input/output fixture.
   `/input` and `/output`. This proves the ELF loader and Linux syscall ABI
   before those paths are connected to the builder memory filesystem; it is
   not counted as completion of the shell or persistence work.
+- A five-byte parser fixture was useful for ABI bring-up but did not prove the
+  compiler against its real source. The self-host gate now loads
+  `hex0_riscv64.hex0`, supplies an independent copy of the expected seed, and
+  compares all 392 output bytes in the supervisor kernel before reporting
+  success.

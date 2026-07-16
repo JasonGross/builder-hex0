@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT
  *
- * RISC-V 64 builder-hex0 stage-2 privilege and paging bring-up.
- * This currently proves the process address-space and ecall boundary.  Disk,
- * filesystem, shell, and ELF loading are added after this gate.
+ * RISC-V 64 builder-hex0 stage-2 privilege, paging, and ELF bring-up.
+ * This proves the process address-space and ecall boundary.  Disk, filesystem,
+ * and shell integration are added after this gate.
  */
 
     .option norvc
@@ -21,6 +21,8 @@
     .equ ELF_SOURCE,         0x82000000
     .equ INPUT_SOURCE,       0x82200000
     .equ OUTPUT_FILE,        0x82400000
+    .equ EXPECTED_SOURCE,    0x82600000
+    .equ EXPECTED_LENGTH,    0x82800000
 
 _start:
     li      sp, KERNEL_STACK_TOP
@@ -294,6 +296,11 @@ syscall_exit:
     call    validate_hex0_output
     bnez    a0, trap_failure
     la      t0, stage0_success
+    li      t1, EXPECTED_LENGTH
+    ld      t1, 0(t1)
+    beqz    t1, 1f
+    la      t0, stage0_selfhost_success
+1:
     call    kernel_puts
     li      a0, 0
 syscall_exit_finish:
@@ -379,15 +386,33 @@ kernel_puts:
 validate_hex0_output:
     la      t0, output_length
     ld      t0, 0(t0)
+    li      t1, EXPECTED_LENGTH
+    ld      t1, 0(t1)
+    beqz    t1, validate_parser_fixture
+    bne     t0, t1, validate_output_failure
+    li      t0, OUTPUT_FILE
+    li      t2, EXPECTED_SOURCE
+1:  beqz    t1, validate_output_success
+    lbu     t3, 0(t0)
+    lbu     t4, 0(t2)
+    bne     t3, t4, validate_output_failure
+    addi    t0, t0, 1
+    addi    t2, t2, 1
+    addi    t1, t1, -1
+    j       1b
+
+validate_parser_fixture:
     li      t1, 5
-    bne     t0, t1, 2f
+    bne     t0, t1, validate_output_failure
     li      t0, OUTPUT_FILE
     ld      t1, 0(t0)
     li      t2, 0x22ffaa1100
-    bne     t1, t2, 2f
+    bne     t1, t2, validate_output_failure
+validate_output_success:
     li      a0, 0
     ret
-2:  li      a0, 1
+validate_output_failure:
+    li      a0, 1
     ret
 
 /* Position-independent user fixture copied to virtual 0x600000. */
@@ -411,6 +436,8 @@ process_name:    .asciz "hex0-seed"
 input_name:      .asciz "/input"
 output_name:     .asciz "/output"
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
+stage0_selfhost_success:
+    .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
 
     .section .data
     .balign 8
