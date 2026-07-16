@@ -29,13 +29,14 @@
 # can build itself and other compilers.
 
 QEMU ?= qemu-system-riscv64
+XXD ?= xxd
 
 all: BUILD/builder-hex0-self-built.bin BUILD/builder-hex0-x86-stage1.img
 
 riscv64-stage1: BUILD/builder-hex0-riscv64-stage1.bin
 
 BUILD/builder-hex0-riscv64-stage1.bin: builder-hex0-riscv64-stage1.hex0 | BUILD
-	cut builder-hex0-riscv64-stage1.hex0 -f1 -d'#' | cut -f1 -d';' | xxd -r -p > $@
+	cut builder-hex0-riscv64-stage1.hex0 -f1 -d'#' | cut -f1 -d';' | $(XXD) -r -p > $@
 
 riscv64-stage1-oracle: riscv64-stage1
 	./build-riscv64-stage1.sh
@@ -43,7 +44,18 @@ riscv64-stage1-oracle: riscv64-stage1
 	diff builder-hex0-riscv64-stage1.hex0 BUILD/builder-hex0-riscv64-stage1-generated.hex0
 	cmp BUILD/builder-hex0-riscv64-stage1.bin BUILD/builder-hex0-riscv64-stage1-oracle.bin
 
-test-riscv64-stage1: riscv64-stage1-oracle
+riscv64-stage2-oracle:
+	./build-riscv64-stage2.sh
+	TITLE='builder-hex0 riscv64 stage 2' DATA_TITLE='non-executable data' RAW_TEXT=1 \
+		./riscv64-stage1-to-hex0.sh \
+		BUILD/builder-hex0-riscv64-stage2.elf \
+		BUILD/builder-hex0-riscv64-stage2-generated.hex0
+	diff builder-hex0-riscv64-stage2.hex0 BUILD/builder-hex0-riscv64-stage2-generated.hex0
+	cut builder-hex0-riscv64-stage2.hex0 -f1 -d'#' | cut -f1 -d';' | $(XXD) -r -p \
+		> BUILD/builder-hex0-riscv64-stage2-from-hex0.bin
+	cmp BUILD/builder-hex0-riscv64-stage2.bin BUILD/builder-hex0-riscv64-stage2-from-hex0.bin
+
+test-riscv64-stage1: riscv64-stage1-oracle riscv64-stage2-oracle
 	./test-riscv64-stage1.sh
 
 test-riscv64-stage2:
@@ -145,4 +157,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean riscv64-stage1 riscv64-stage1-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost

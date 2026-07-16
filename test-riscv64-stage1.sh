@@ -73,4 +73,13 @@ dd if="$SELF_IMAGE" of="$SELF_ACTUAL" bs=1 skip=32768 \
     count="$oracle_bytes" status=none
 cmp BUILD/builder-hex0-riscv64-stage1.bin "$SELF_ACTUAL"
 
-printf '%s\n' 'riscv64 stage1 parser, virtio, and self-build tests passed'
+STAGE2_IMAGE=BUILD/builder-hex0-riscv64-stage1-stage2.img
+STAGE2_ACTUAL=BUILD/builder-hex0-riscv64-stage1-stage2.bin
+make_image "$STAGE2_IMAGE" builder-hex0-riscv64-stage2.hex0 64
+run_builder "$STAGE2_IMAGE" BUILD/builder-hex0-riscv64-stage1-stage2.log
+stage2_bytes=$(wc -c < BUILD/builder-hex0-riscv64-stage2.bin)
+dd if="$STAGE2_IMAGE" of="$STAGE2_ACTUAL" bs=1 skip=32768 \
+    count="$stage2_bytes" status=none
+cmp BUILD/builder-hex0-riscv64-stage2.bin "$STAGE2_ACTUAL"
+
+printf '%s\n' 'riscv64 stage1 parser, virtio, and stage1/stage2 trust tests passed'

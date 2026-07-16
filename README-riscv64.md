@@ -69,11 +69,14 @@ The independent oracle additionally requires a riscv64 GNU binutils toolchain:
 
 ```sh
 make riscv64-stage1-oracle
+make riscv64-stage2-oracle
 ```
 
 That target assembles `builder-hex0-riscv64-stage1.S`, regenerates the
 commented hex0 source, and proves both produce identical bytes. The assembly is
 an executable specification and review aid; the checked-in hex0 is the seed.
+The stage-2 oracle does the same for `builder-hex0-riscv64-stage2.S` and its
+checked-in hex0 image.
 
 Run the emulator tests with:
 
@@ -89,9 +92,11 @@ make test-riscv64-stage2-stage0-selfhost \
 
 The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
 and writes, legacy and modern virtio transports, and byte-identical
-self-building. The stage-2 tests cover U-mode trap entry, execution of the
-real stage0-posix seed against a deterministic parser fixture, and
-byte-identical reconstruction of that seed from its canonical hex0 source.
+self-building. Stage 1 also compiles the checked-in stage-2 hex0 and compares it
+with the independent assembler image. The stage-2 tests cover U-mode trap
+entry, execution of the real stage0-posix seed against a deterministic parser
+fixture, and byte-identical reconstruction of that seed from its canonical
+hex0 source.
 
 ## Stage-2 plan
 
@@ -141,3 +146,8 @@ byte-identical reconstruction of that seed from its canonical hex0 source.
   `hex0_riscv64.hex0`, supplies an independent copy of the expected seed, and
   compares all 392 output bytes in the supervisor kernel before reporting
   success.
+- Stage 2 initially existed only as GNU assembly, which left the stage-1 trust
+  handoff untested. It now has a 6,565-byte checked-in hex0 source. The
+  assembler oracle and stage-1-built output both produce the same 1,840-byte
+  image (SHA-256
+  `190a8adfc0959e9b7a7c23c9c6d83b9aa5f4ee8fd04c718f3310bbb28137e9b1`).

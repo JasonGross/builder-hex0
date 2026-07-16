@@ -438,6 +438,8 @@ output_name:     .asciz "/output"
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
+    /* Keep the following data section contiguous in the raw image. */
+    .balign 8
 
     .section .data
     .balign 8
