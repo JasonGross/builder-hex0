@@ -116,7 +116,7 @@ make test-riscv64-stage2-chain \
 
 The focused emulator gates default to a 20-second limit. Set `TIMEOUT` to a
 larger value on a loaded emulation host; the canonical chain has a separate
-eight-hour default because M0 and M2-Planet are substantially more expensive.
+24-hour default because M0 and M2-Planet are substantially more expensive.
 
 The stage-1 tests cover mixed-case digits, both comment syntaxes, sector reads
 and writes, legacy and modern virtio transports, and byte-identical
@@ -244,3 +244,7 @@ the canonical stage0-posix sources rather than reduced fixtures.
   concurrent canonical chain could make a correct stage-1 build exceed that
   wall clock after emitting its success marker. The gates retain 20 seconds as
   their default but now honor a `TIMEOUT` override.
+- The full-chain harness initially defaulted to eight hours. The canonical run
+  remained healthy and CPU-bound in M0 at 7 hours 57 minutes, before it could
+  compile the C compiler or M2-Planet. Its separate default is now 24 hours;
+  focused test limits remain unchanged.

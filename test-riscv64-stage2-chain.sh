@@ -3,7 +3,7 @@ set -eu
 
 QEMU=${QEMU:-qemu-system-riscv64}
 STAGE0_DIR=${STAGE0_DIR:-../stage0-posix-riscv64}
-TIMEOUT=${TIMEOUT:-28800}
+TIMEOUT=${TIMEOUT:-86400}
 
 write_u64_le()
 {
