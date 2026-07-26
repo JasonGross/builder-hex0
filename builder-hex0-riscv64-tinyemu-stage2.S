@@ -1378,6 +1378,17 @@ virtio_sector:
 6:  fence   r, r
     lhu     t2, 2(t0)
     beq     t1, t2, 6b
+    /* ISR-ACK (2026-07-26 rev): consume-and-ack the device interrupt so the
+     * PLIC line is LOW after every polled I/O, including at the kexec handoff.
+     * Without it a stale asserted line fires into Linux before virtio_blk is
+     * mapped; linux-6.1 plic_handle_irq never completes unmapped claims, the
+     * PLIC served bit wedges (deliverable = pending & ~served), and the later
+     * partition-read completion interrupt is masked forever -> the [vda] boot
+     * freeze. Read InterruptStatus (0x60), write it back to InterruptACK (0x64). */
+    la      t2, virtio_base
+    ld      t2, 0(t2)
+    lw      t3, 0x60(t2)
+    sw      t3, 0x64(t2)
     li      t0, VIRTIO_STATUS
     lbu     t1, 0(t0)
     bnez    t1, disk_failure
