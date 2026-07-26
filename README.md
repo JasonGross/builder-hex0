@@ -5,6 +5,10 @@ It runs in the form of a bootable disk image.
 The in-progress native riscv64 port and its design constraints are documented
 in [README-riscv64.md](README-riscv64.md).
 
+The stacked ARM port starts with the canonical AArch64 seed and pivots to
+ARMv7 at the existing compiler boundary. Its milestones and ISA contract are
+documented in [README-arm.md](README-arm.md).
+
 It has these features:
 * The binary is less than 4K in size, written in about 2600 lines of commented hexadecimal for x86 opcodes
 * Includes a minimal 32-bit x86 POSIX kernel
