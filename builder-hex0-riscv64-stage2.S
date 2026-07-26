@@ -40,6 +40,19 @@
     .equ SECTOR_BUFFER,      0x83804000
     .equ FILE_DATA,          0x84000000
     .equ FILE_DATA_TOP,      0x85000000
+    /* kexec service.  The staging strip and relocated trampoline live in the
+       root[3] gigapage (0xc0000000..0xffffffff) that the service adds to the
+       page tables; they sit clear of the census structures (which top out below
+       0x88000000) and are only backed when kexec is actually invoked, so the
+       stage0-posix census chain -- which never touches them -- runs unchanged on
+       a small machine.  KEXEC_TABLE is a free page in the already-identity-mapped
+       root[2] gigapage. */
+    .equ KEXEC_TABLE,        0xb901d000   /* stage table (root[2], S-accessible) */
+    .equ KEXEC_TRAMP_PA,     0xf8000000   /* trampoline copy target (root[3]) */
+    .equ KEXEC_STRIP,        0xfa000000   /* staging strip base (bumps upward) */
+    .equ KEXEC_STRIP_END,    0xfd000000   /* strip ceiling (~48 MiB) */
+    .equ KEXEC_MAGIC,        0x4B455845   /* "KEXE" a7 discriminator */
+    .equ USER_PA_OFFSET,     0x80000000   /* src_uva + this = src_pa */
     .equ PARENT_FDS,         0x83f00000
     .equ PARENT_FRAME,       0x83f02000
     .equ EXEC_ARGV,          0x83f04000
@@ -166,7 +179,30 @@ image_loaded:
     j       init_filesystem_common
 
 init_empty_filesystem:
+    /* On TinyEMU expose the pristine FDT (always at PA 0x1040, never
+       overwritten) as a read-only /dev/dtb so a kexec loader can read and
+       rebuild it.  qemu-virt has no FDT at 0x1040 (it is below RAM), so skip it
+       there and start with an empty table.  We are in M mode here (pre-mret),
+       so 0x1040 is a direct physical read. */
+    la      t2, machine_id
+    ld      t2, 0(t2)
+    beqz    t2, 9f                 /* qemu-virt: empty filesystem */
+    li      t2, FILE_TABLE
+    la      t3, dev_dtb_name
+    sd      t3, 0(t2)              /* name -> "/dev/dtb" */
+    li      t3, 0x1040
+    sd      t3, 8(t2)              /* data -> pristine FDT @ PA 0x1040 */
+    lbu     t4, 4(t3); slli t4, t4, 24
+    lbu     t5, 5(t3); slli t5, t5, 16; or t4, t4, t5
+    lbu     t5, 6(t3); slli t5, t5,  8; or t4, t4, t5
+    lbu     t5, 7(t3);                   or t4, t4, t5
+    sd      t4, 16(t2)             /* length = FDT totalsize (big-endian at +4) */
+    sd      t4, 24(t2)             /* capacity */
     la      t2, file_count
+    li      t3, 1
+    sd      t3, 0(t2)              /* one built-in file: /dev/dtb */
+    j       init_filesystem_common
+9:  la      t2, file_count
     sd      zero, 0(t2)
 
 init_filesystem_common:
@@ -219,6 +255,14 @@ init_filesystem_common:
     srli    t1, t1, 2
     ori     t1, t1, 0xcf           /* V R W X A D */
     sd      t1, 16(t0)
+
+    /* root[3]: identity-map 0xc0000000..0xffffffff so the kexec service's S-mode
+       staging writes (strip at 0xfa000000) resolve.  Present but never walked
+       unless kexec is invoked; the census chain does not touch this range. */
+    li      t1, 0xc0000000
+    srli    t1, t1, 2
+    ori     t1, t1, 0xcf           /* V R W X A D */
+    sd      t1, 24(t0)
 
     /* root[1]: identity-map 0x40000000..0x7fffffff.  Harmless on qemu-virt (an
        unused range); on TinyEMU it covers HTIF @0x40008000 and virtio MMIO. */
@@ -392,8 +436,77 @@ supervisor_trap:
     beq     a7, t0, syscall_wait4
     li      t0, 93                 /* Linux riscv64 exit */
     beq     a7, t0, syscall_exit
+    li      t0, 500                /* private kexec_stage */
+    beq     a7, t0, syscall_kexec_stage
+    li      t0, 501                /* private kexec_go */
+    beq     a7, t0, syscall_kexec_go
     li      a0, -38                /* -ENOSYS */
     j       trap_return
+
+    /* --- kexec service handlers (S-mode; kept near the dispatch so the branch
+       offsets stay in range).  500 kexec_stage copies a user region into the
+       staging strip and records it; 501 kexec_go re-ecalls from S with the KEXE
+       magic so an un-delegated scause 9 reaches machine_trap (M-mode). --- */
+syscall_kexec_stage:
+    /* a0=dst_phys, a1=src_uva, a2=len.  Returns 0 / -EINVAL(-22). */
+    li      t0, USER_VIRT
+    bltu    a1, t0, kexec_einval
+    li      t0, USER_STACK_TOP
+    add     t1, a1, a2
+    bltu    t0, t1, kexec_einval   /* src end past the user window */
+    la      t2, kexec_strip_next
+    ld      t3, 0(t2)
+    bnez    t3, 1f
+    li      t3, KEXEC_STRIP        /* first call: init to base */
+1:  add     t4, t3, a2
+    li      t0, KEXEC_STRIP_END
+    bltu    t0, t4, kexec_einval   /* strip overflow */
+    li      t0, USER_PA_OFFSET
+    add     t5, a1, t0             /* src_pa = src_uva + offset */
+    mv      t6, t3                 /* dst = staged_pa */
+    mv      t1, a2
+2:  beqz    t1, 3f
+    lbu     t0, 0(t5)
+    sb      t0, 0(t6)
+    addi    t5, t5, 1
+    addi    t6, t6, 1
+    addi    t1, t1, -1
+    j       2b
+3:  la      t0, kexec_count
+    ld      t1, 0(t0)
+    slli    t6, t1, 3
+    slli    t5, t1, 4
+    add     t6, t6, t5             /* count*24 */
+    li      t5, KEXEC_TABLE
+    add     t6, t6, t5
+    sd      a0, 0(t6)              /* dst_phys */
+    sd      t3, 8(t6)              /* staged_pa */
+    sd      a2, 16(t6)             /* len */
+    addi    t1, t1, 1
+    sd      t1, 0(t0)              /* count++ */
+    add     t3, t3, a2
+    sd      t3, 0(t2)              /* strip_next += len */
+    li      a0, 0
+    j       trap_return
+kexec_einval:
+    li      a0, -22
+    j       trap_return
+
+syscall_kexec_go:
+    /* a0=entry_pa, a1=fdt_pa, a2=magic.  Stash + re-ecall from S-mode; scause 9
+       is un-delegated so it reaches machine_trap (M-mode). */
+    li      t0, KEXEC_MAGIC
+    bne     a2, t0, kexec_einval
+    la      t0, kexec_count
+    ld      t0, 0(t0)
+    beqz    t0, kexec_einval       /* nothing staged */
+    la      t0, kexec_entry
+    sd      a0, 0(t0)
+    la      t0, kexec_fdt
+    sd      a1, 0(t0)
+    li      a7, KEXEC_MAGIC
+    ecall                          /* -> M-mode machine_trap (scause 9) */
+    j       kexec_einval           /* unreachable */
 
 syscall_write:
     li      t0, 1
@@ -872,6 +985,34 @@ trap_failure:
     j       poweroff
 
 machine_trap:
+    /* kexec discriminator: an ecall-from-S (mcause 9) carrying the KEXE magic in
+       a7 performs the kexec; ANY other trap keeps the diagnostic dump + poweroff
+       (unchanged safety).  M-mode here => physical addressing. */
+    csrr    t0, mcause
+    li      t1, 9                  /* ecall from S-mode */
+    bne     t0, t1, machine_trap_dump
+    li      t1, KEXEC_MAGIC
+    bne     a7, t1, machine_trap_dump
+    /* copy the position-independent trampoline to KEXEC_TRAMP_PA (clear of every
+       dst and the strip) then enter it. */
+    la      t0, kexec_tramp
+    la      t1, kexec_tramp_end
+    li      t2, KEXEC_TRAMP_PA
+1:  bgeu    t0, t1, 2f
+    ld      t3, 0(t0)
+    sd      t3, 0(t2)
+    addi    t0, t0, 8
+    addi    t2, t2, 8
+    j       1b
+2:  fence.i
+    li      a0, KEXEC_TABLE
+    la      t0, kexec_count; ld a1, 0(t0)
+    la      t0, kexec_entry; ld a2, 0(t0)
+    la      t0, kexec_fdt;   ld a3, 0(t0)
+    li      t0, KEXEC_TRAMP_PA
+    jr      t0
+
+machine_trap_dump:
     li      sp, KERNEL_STACK_TOP - 4096
     la      t0, machine_trap_message  /* kernel_puts reads its string from t0
                                          (la a0 was a latent no-print bug) */
@@ -890,6 +1031,30 @@ machine_trap:
     call    kernel_putc
     li      a0, 1
     j       poweroff
+
+    /* Relocatable M-mode trampoline (copied to KEXEC_TRAMP_PA before entry).
+       a0=table, a1=count, a2=entry, a3=fdt.  Copies each staged region to its
+       dst, fence.i, then a0=hartid a1=fdt jr entry.  Sets NO CSR. */
+kexec_tramp:
+1:  beqz    a1, 3f
+    ld      t0, 0(a0)              /* dst */
+    ld      t1, 8(a0)              /* staged */
+    ld      t2, 16(a0)             /* len */
+2:  beqz    t2, 4f
+    lbu     t3, 0(t1)
+    sb      t3, 0(t0)
+    addi    t1, t1, 1
+    addi    t0, t0, 1
+    addi    t2, t2, -1
+    j       2b
+4:  addi    a0, a0, 24
+    addi    a1, a1, -1
+    j       1b
+3:  fence.i
+    li      a0, 0                  /* hartid */
+    mv      a1, a3                 /* fdt_pa */
+    jr      a2                     /* entry */
+kexec_tramp_end:
 
 trap_return:
     ld      ra, 0(sp)
@@ -2329,6 +2494,7 @@ input_name:      .asciz "/input"
 output_name:     .asciz "/output"
 exec_target_name: .asciz "/exec-target"
 dev_hda_name:     .asciz "/dev/hda"
+dev_dtb_name:     .asciz "/dev/dtb"
 command_src:      .asciz "src"
 command_hex0:     .asciz "hex0"
 command_flush:    .asciz "f"
@@ -2409,3 +2575,8 @@ shell_resume_ra:    .dword 0
 shell_command_ptr:  .dword 0
 shell_argument_ptr: .dword 0
 machine_id:         .dword 0       /* 0 = qemu-virt, 1 = TinyEMU (set at boot) */
+/* kexec service state */
+kexec_strip_next:   .dword 0          /* 0 => init to KEXEC_STRIP on first stage */
+kexec_count:        .dword 0
+kexec_entry:        .dword 0
+kexec_fdt:          .dword 0
