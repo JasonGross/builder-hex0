@@ -21,40 +21,57 @@
     .equ HTIF_BASE,          0x40008000
     .equ VIRTIO_FIRST,       0x40010000
     .equ VIRTIO_END,         0x40018000
-    .equ ROOT_PAGE_TABLE,    0x82a00000
-    .equ LOW_PAGE_TABLE,     0x82a01000
+    /* Enlarged 2 GiB physical map (temu memory_size 2048) for the Mes/tcc kaem
+       era.  USER_PHYS / USER_VIRT and the 0x80000000 kernel<->user offset are
+       DELIBERATELY unchanged so the built-in ELF fixtures (linked at VA
+       0x00600000) and every VA<->PA conversion keep holding; only the heap
+       ceiling grows and the kernel-structure band moves above the user region.
+         kernel code    0x80000000..0x80600000   (6 MiB)
+         user heap      0x80600000..0xb8000000   (~890 MiB, VA 0x00600000..0x38000000)
+         user stack     0xb8000000..0xb8800000   (8 MiB)
+         kernel band    0xb9000000..0xbc000000   (page tables, virtio, buffers, file table)
+         file data      0xc0000000..0xe0000000   (512 MiB)
+         parent snapshot 0xe0000000..0xffeff000  + kernel stack near top
+       Mes's single up-front arena for the tcc-0.9.26 MesCC pass fits in the
+       ~890 MiB heap at the Guix-default arena sizing (see docs); the MMIO
+       gigapage at VA 0x40000000 is left untouched, so user VA stays below it. */
+    .equ ROOT_PAGE_TABLE,    0xb9000000
+    .equ LOW_PAGE_TABLE,     0xb9001000
     .equ USER_PHYS,          0x80600000
     .equ USER_VIRT,          0x00600000
-    .equ USER_HEAP_TOP,      0x02000000
-    .equ USER_STACK_PHYS,    0x85000000
-    .equ USER_STACK_TOP,     0x05800000
+    .equ USER_HEAP_TOP,      0x38000000
+    .equ USER_STACK_PHYS,    0xb8000000
+    .equ USER_STACK_TOP,     0x38800000
     .equ USER_STACK_SIZE,    0x00800000
-    .equ KERNEL_STACK_TOP,   0x87dff000
-    .equ ELF_SOURCE,         0x82000000
-    .equ INPUT_SOURCE,       0x82200000
-    .equ OUTPUT_FILE,        0x82400000
-    .equ EXPECTED_SOURCE,    0x82600000
-    .equ EXPECTED_LENGTH,    0x82800000
-    .equ FILE_TABLE,         0x83000000
-    .equ FD_TABLE,           0x83010000
-    .equ VIRTQ_DESC,         0x83800000
-    .equ VIRTQ_AVAIL,        0x83801000
-    .equ VIRTQ_USED,         0x83802000
-    .equ VIRTIO_HEADER,      0x83803000
-    .equ VIRTIO_STATUS,      0x83803010
-    .equ SECTOR_BUFFER,      0x83804000
-    .equ FILE_DATA,          0x84000000
-    .equ FILE_DATA_TOP,      0x85000000
-    .equ PARENT_FDS,         0x83f00000
-    .equ PARENT_FRAME,       0x83f02000
-    .equ EXEC_ARGV,          0x83f04000
-    .equ EXEC_STRINGS,       0x83f05000
-    .equ PATH_BUFFER,        0x83f07000
-    .equ CWD_BUFFER,         0x83f08000
-    .equ SHELL_LINE_BUFFER,  0x83f09000
-    .equ SHELL_TRAP_STACK,   0x83f0c000
-    .equ PARENT_PROCESS,     0x85800000
-    .equ PARENT_STACK,       0x87200000
+    .equ KERNEL_STACK_TOP,   0xffeff000
+    .equ ELF_SOURCE,         0xb9200000
+    .equ INPUT_SOURCE,       0xb9400000
+    .equ OUTPUT_FILE,        0xb9600000
+    .equ EXPECTED_SOURCE,    0xb9800000
+    .equ EXPECTED_LENGTH,    0xb9a00000
+    .equ FILE_TABLE,         0xba000000
+    .equ FD_TABLE,           0xbb000000
+    .equ NAME_SCRATCH,       0xbb200000
+    .equ VIRTQ_DESC,         0xb9003000
+    .equ VIRTQ_AVAIL,        0xb9004000
+    .equ VIRTQ_USED,         0xb9005000
+    .equ VIRTIO_HEADER,      0xb9006000
+    .equ VIRTIO_STATUS,      0xb9006010
+    .equ SECTOR_BUFFER,      0xb9008000
+    .equ FILE_DATA,          0xc0000000
+    .equ FILE_DATA_TOP,      0xe0000000
+    .equ PARENT_FDS,         0xb9010000
+    .equ PARENT_FRAME,       0xb9012000
+    .equ EXEC_ARGV,          0xb9014000
+    .equ EXEC_ENVP,          0xb9014800  /* env ptr array, spare of the EXEC_ARGV page */
+    .equ EXEC_STRINGS,       0xb9015000
+    .equ EXEC_ENVP_STRINGS,  0xb9016000  /* free page between EXEC_STRINGS and PATH_BUFFER */
+    .equ PATH_BUFFER,        0xb9017000
+    .equ CWD_BUFFER,         0xb9018000
+    .equ SHELL_LINE_BUFFER,  0xb9019000
+    .equ SHELL_TRAP_STACK,   0xb901c000
+    .equ PARENT_PROCESS,     0xe0000000
+    .equ PARENT_STACK,       0xf0000000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
     .equ SHELL_HEADER_MAGIC, 0x3256535244485842
@@ -229,14 +246,22 @@ init_filesystem_common:
     ori     t1, t1, 0xcf           /* V R W X A D */
     sd      t1, 8(t0)
 
+    /* root[3]: identity-map 0xc0000000..0xffffffff (file data + parent snapshot
+       + kernel stack now live above 0xc0000000 in the enlarged map). */
+    li      t1, 0xc0000000
+    srli    t1, t1, 2
+    ori     t1, t1, 0xcf           /* V R W X A D */
+    sd      t1, 24(t0)
+
     li      t0, LOW_PAGE_TABLE
     li      t1, 0xcf
     sd      t1, 0(t0)              /* VA 0..2 MiB identity: finisher */
 
-    /* VA 0x600000..0x1fffffff -> PA 0x80600000..., user R/W/X. */
+    /* VA 0x600000..0x37ffffff -> PA 0x80600000..0xb7ffffff, user R/W/X
+       (~890 MiB heap: 445 leaves of 2 MiB, level-1 indices 3..447). */
     li      t1, USER_PHYS
     addi    t0, t0, 24             /* level-1 index 3 */
-    li      t2, 13                 /* thirteen 2 MiB leaves */
+    li      t2, 445                /* 445 two-MiB leaves */
 7:  srli    t3, t1, 2
     ori     t3, t3, 0xdf           /* V R W X U A D */
     sd      t3, 0(t0)
@@ -246,9 +271,9 @@ init_filesystem_common:
     addi    t2, t2, -1
     bnez    t2, 7b
 
-    /* Map four 2 MiB leaves for the 8 MiB user stack. */
-    li      t0, LOW_PAGE_TABLE
-    addi    t0, t0, 320             /* level-1 index 40 */
+    /* Map four 2 MiB leaves for the 8 MiB user stack (VA 0x38000000.., just
+       above the heap ceiling; level-1 index 448 = 448 * 8 = 3584). */
+    li      t0, LOW_PAGE_TABLE + 3584   /* level-1 index 448 (448 * 8 bytes) */
     li      t1, USER_STACK_PHYS
     li      t2, USER_STACK_SIZE / 0x200000
 8:  srli    t3, t1, 2
@@ -382,7 +407,69 @@ supervisor_trap:
     beq     a7, t0, syscall_wait4
     li      t0, 93                 /* Linux riscv64 exit */
     beq     a7, t0, syscall_exit
+    li      t0, 34                 /* Linux riscv64 mkdirat */
+    beq     a7, t0, syscall_mkdirat
+    li      t0, 17                 /* Linux riscv64 getcwd */
+    beq     a7, t0, syscall_getcwd
+    li      t0, 36                 /* Linux riscv64 symlinkat */
+    beq     a7, t0, syscall_symlinkat
+    li      t0, 29                 /* Linux riscv64 ioctl */
+    beq     a7, t0, syscall_ioctl
+    li      t0, 160                /* Linux riscv64 uname */
+    beq     a7, t0, syscall_stub_ok
+    li      t0, 169                /* Linux riscv64 gettimeofday */
+    beq     a7, t0, syscall_stub_ok
+    li      t0, 113                /* Linux riscv64 clock_gettime */
+    beq     a7, t0, syscall_stub_ok
     li      a0, -38                /* -ENOSYS */
+    j       trap_return
+
+    /* --- Mes/tcc kaem-era syscall extensions ---
+       The stage0 chain needed only the flat file set; the Mes->tcc kaem era
+       additionally does mkdir/cd into a directory tree, getcwd, and probes a
+       tmpdir via faccessat.  The memfs is flat (canonical-path keys, chdir is a
+       CWD prefix, directories are implicit), so mkdirat records a zero-length
+       marker for the path — enough for faccessat/chdir to resolve it — and the
+       rest are minimal returns.  symlinkat is a success no-op (no symlinks in a
+       flat namespace) so untar --strict does not abort; ioctl reports not-a-tty
+       so isatty() is false; uname/gettimeofday/clock_gettime return 0. */
+syscall_getcwd:
+    /* a0 = user buffer, a1 = size.  Copy CWD_BUFFER, return length incl NUL. */
+    mv      t0, a0
+    li      t1, CWD_BUFFER
+    li      a0, 0
+1:  lbu     t2, 0(t1)
+    sb      t2, 0(t0)
+    addi    t0, t0, 1
+    addi    t1, t1, 1
+    addi    a0, a0, 1
+    bnez    t2, 1b
+    j       trap_return
+
+syscall_mkdirat:
+    /* a0 = dirfd, a1 = path, a2 = mode.  Idempotent directory marker. */
+    mv      a0, a1
+    li      a1, PATH_BUFFER
+    call    normalize_path
+    beqz    a0, syscall_name_too_long
+    mv      s0, a0
+    call    find_file
+    bnez    a0, 1f                 /* already present -> success */
+    mv      a0, s0
+    call    create_file
+1:  li      a0, 0
+    j       trap_return
+
+syscall_symlinkat:
+    li      a0, 0
+    j       trap_return
+
+syscall_ioctl:
+    li      a0, -25                /* -ENOTTY */
+    j       trap_return
+
+syscall_stub_ok:
+    li      a0, 0
     j       trap_return
 
 syscall_write:
@@ -669,6 +756,8 @@ syscall_clone:
     j       trap_return
 
 syscall_execve:
+    la      t0, exec_envp_ptr      /* save envp (a2) before normalize_path/find_file clobber it */
+    sd      a2, 0(t0)
     mv      s1, a1                 /* argv */
     li      a1, PATH_BUFFER
     call    normalize_path
@@ -688,7 +777,10 @@ syscall_execve:
 1:  beqz    s1, 4f
     ld      t2, 0(s1)
     beqz    t2, 4f
-    li      t3, 31
+    li      t3, 128                /* argv cap: post-pre-concat the mes/tcc drivers peak at
+                                      ~78 args (flag-heavy tcc boot compiles); host pre-concat
+                                      dissolves the 336-arg M2-Planet / 260-arg catm. 128 slots
+                                      x8 = 0x400 < the 0x600 ptr region below. Oversized -> -E2BIG. */
     bgeu    s4, t3, syscall_arg_too_big
     sd      t1, 0(t0)
 2:  li      t3, EXEC_STRINGS + 0xc00
@@ -703,15 +795,47 @@ syscall_execve:
     addi    s4, s4, 1
     j       1b
 4:
+    /* Copy envp out of the old image too, before PT_LOAD overwrites it. */
+    la      t6, exec_envp_ptr
+    ld      t6, 0(t6)              /* t6 = envp (may be zero) */
+    li      t0, EXEC_ENVP
+    li      t1, EXEC_ENVP_STRINGS
+    li      t4, 0                  /* env entry count */
+8:  beqz    t6, 9f
+    ld      t2, 0(t6)             /* envp[i] */
+    beqz    t2, 9f
+    li      t3, 31
+    bgeu    t4, t3, 9f            /* cap env entries at 31 */
+    li      t3, EXEC_ENVP + 0xf8
+    bgeu    t0, t3, 9f
+    sd      t1, 0(t0)            /* record scratch string dest */
+7:  li      t3, EXEC_ENVP_STRINGS + 0xc00
+    bgeu    t1, t3, syscall_arg_too_big  /* env string overflow -> loud -E2BIG (rider 1) */
+    lbu     t3, 0(t2)
+    sb      t3, 0(t1)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    bnez    t3, 7b
+    addi    t0, t0, 8
+    addi    t6, t6, 8
+    addi    t4, t4, 1
+    j       8b
+9:  la      t0, exec_env_count
+    sd      t4, 0(t0)
     mv      a0, s2
     call    load_elf
     mv      s3, a0                 /* entry */
 
-    /* Construct argc/argv/envp in the top user-stack page. */
-    li      s0, USER_STACK_PHYS + USER_STACK_SIZE - 4096
+    /* Construct argc/argv/envp in the top TWO user-stack pages (8 KiB).
+       argc@base; argv+envp ptr slots [base+8, base+0x600) = 192 slots (covers
+       argv cap 128 + envp cap 31 + argc + two NULLs = 162); strings
+       [base+0x600, base+0x2000) = 6656 B >= argv-str cap 0xc00 + env-str cap
+       0xc00 = 6144, so the copy-out below CANNOT overflow the mapped block --
+       any oversized argv/env already failed -E2BIG at copy-in (rider 1). */
+    li      s0, USER_STACK_PHYS + USER_STACK_SIZE - 8192
     sd      s4, 0(s0)
-    addi    s1, s0, 8              /* argv pointer slots */
-    li      s2, USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 0x400
+    addi    s1, s0, 8              /* argv/envp pointer slots */
+    li      s2, USER_STACK_PHYS + USER_STACK_SIZE - 8192 + 0x600
     li      t0, EXEC_ARGV
     li      t1, 0
 5:  bgeu    t1, s4, 6f
@@ -730,9 +854,30 @@ syscall_execve:
     addi    t0, t0, 8
     addi    t1, t1, 1
     j       5b
-6:  sd      zero, 0(s1)            /* argv[argc] */
-    sd      zero, 8(s1)            /* envp[0] */
-    li      t0, USER_STACK_TOP - 4096
+6:  sd      zero, 0(s1)            /* argv[argc] = NULL */
+    addi    s1, s1, 8              /* advance to the envp[0] slot */
+    li      t0, EXEC_ENVP
+    la      t1, exec_env_count
+    ld      t1, 0(t1)
+    li      t4, 0                  /* i */
+11: bgeu    t4, t1, 12f
+    li      t2, 0x80000000
+    sub     t2, s2, t2            /* physical string address -> user VA */
+    sd      t2, 0(s1)
+    ld      t2, 0(t0)            /* scratch env string source */
+    mv      t3, s2
+10: lbu     t5, 0(t2)
+    sb      t5, 0(t3)
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    bnez    t5, 10b
+    mv      s2, t3
+    addi    s1, s1, 8
+    addi    t0, t0, 8
+    addi    t4, t4, 1
+    j       11b
+12: sd      zero, 0(s1)            /* envp[envc] = NULL */
+    li      t0, USER_STACK_TOP - 8192
     csrw    sscratch, t0
     csrw    sepc, s3
     li      a0, 0
@@ -1134,7 +1279,7 @@ load_elf:
     bltu    t2, t1, trap_failure
     add     t3, s4, t2
     bltu    t3, s4, trap_failure
-    li      t4, 0x82000000
+    li      t4, USER_STACK_PHYS    /* top of the user heap PA region */
     bgtu    t3, t4, trap_failure
     li      t4, USER_PHYS - USER_VIRT
     sub     t5, t3, t4             /* virtual segment end */
@@ -1370,7 +1515,7 @@ create_file:
     mv      s0, a0
     la      t0, file_count
     ld      s1, 0(t0)
-    li      t1, 256
+    li      t1, 8192               /* FILE_TABLE holds 512K slots; 8192 covers the mescc-tools era */
     bgeu    s1, t1, 3f
     slli    t1, s1, 5
     li      s2, FILE_TABLE
@@ -1380,7 +1525,7 @@ create_file:
     ld      t0, 0(t1)
     beqz    t0, 1f
     j       2f
-1:  li      t0, 0x83100000
+1:  li      t0, NAME_SCRATCH
 2:  sd      t0, 0(s2)
 4:  lbu     t2, 0(s0)
     sb      t2, 0(t0)
@@ -2263,6 +2408,8 @@ output_length:      .dword 0
 file_count:         .dword 0
 next_file_name:     .dword 0
 next_file_data:     .dword FILE_DATA
+exec_envp_ptr:      .dword 0
+exec_env_count:     .dword 0
 process_brk:        .dword 0x00800000
 child_process:      .dword 0
 child_exit_status:  .dword 0
