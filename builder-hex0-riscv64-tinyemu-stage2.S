@@ -60,6 +60,16 @@
     .equ SECTOR_BUFFER,      0xb9008000
     .equ FILE_DATA,          0xc0000000
     .equ FILE_DATA_TOP,      0xe0000000
+    /* P0 kexec service (see p0-drafts/kexec-service.S).  The staging strip,
+       stage table, and relocated trampoline live in the root[3] gigapage
+       (0xc0000000..0xffffffff), ABOVE the parent snapshot/stack windows
+       (0xe0000000/0xf0000000..0xf0800000) so they are clear at kexec_go. */
+    .equ KEXEC_TABLE,        0xb901d000   /* free page after SHELL_TRAP_STACK */
+    .equ KEXEC_TRAMP_PA,     0xf8000000   /* trampoline copy target (safe at go) */
+    .equ KEXEC_STRIP,        0xfa000000   /* staging strip base (bumps upward) */
+    .equ KEXEC_STRIP_END,    0xfd000000   /* strip ceiling (~48 MiB) */
+    .equ KEXEC_MAGIC,        0x4B455845   /* "KEXE" a7 discriminator */
+    .equ USER_PA_OFFSET,     0x80000000   /* src_uva + this = src_pa */
     .equ PARENT_FDS,         0xb9010000
     .equ PARENT_FRAME,       0xb9012000
     .equ EXEC_ARGV,          0xb9014000
@@ -186,8 +196,25 @@ image_loaded:
     j       init_filesystem_common
 
 init_empty_filesystem:
+    /* P0: expose the pristine TinyEMU FDT (always at PA 0x1040, never
+       overwritten) as a read-only /dev/dtb file so the tcc-built kexec-fiwix
+       loader can read + rebuild it.  Length = the FDT's big-endian totalsize
+       (header offset +4).  We run in M-mode here (pre-mret), so 0x1040 is a
+       direct physical read. */
+    li      t2, FILE_TABLE
+    la      t3, dev_dtb_name
+    sd      t3, 0(t2)              /* name -> "/dev/dtb" */
+    li      t3, 0x1040
+    sd      t3, 8(t2)              /* data -> pristine FDT @ PA 0x1040 */
+    lbu     t4, 4(t3); slli t4, t4, 24
+    lbu     t5, 5(t3); slli t5, t5, 16; or t4, t4, t5
+    lbu     t5, 6(t3); slli t5, t5,  8; or t4, t4, t5
+    lbu     t5, 7(t3);                   or t4, t4, t5
+    sd      t4, 16(t2)             /* length = FDT totalsize */
+    sd      t4, 24(t2)             /* capacity */
     la      t2, file_count
-    sd      zero, 0(t2)
+    li      t3, 1
+    sd      t3, 0(t2)              /* one built-in file: /dev/dtb */
 
 init_filesystem_common:
     la      t2, next_file_data
@@ -421,8 +448,76 @@ supervisor_trap:
     beq     a7, t0, syscall_stub_ok
     li      t0, 113                /* Linux riscv64 clock_gettime */
     beq     a7, t0, syscall_stub_ok
+    li      t0, 500                /* P0 private kexec_stage */
+    beq     a7, t0, syscall_kexec_stage
+    li      t0, 501                /* P0 private kexec_go */
+    beq     a7, t0, syscall_kexec_go
     li      a0, -38                /* -ENOSYS */
     j       trap_return
+
+    /* --- P0 kexec service handlers (S-mode; kept near the dispatch so the
+       branch offsets stay in range).  See p0-drafts/kexec-service.S. --- */
+syscall_kexec_stage:
+    /* a0=dst_phys, a1=src_uva, a2=len.  Copy the user buffer into the strip
+       and record {dst,staged,len}.  Returns 0 / -EINVAL(-22). */
+    li      t0, USER_VIRT
+    bltu    a1, t0, kexec_einval
+    li      t0, USER_STACK_TOP
+    add     t1, a1, a2
+    bltu    t0, t1, kexec_einval   /* src end past the user window */
+    la      t2, kexec_strip_next
+    ld      t3, 0(t2)
+    bnez    t3, 1f
+    li      t3, KEXEC_STRIP        /* first call: init to base */
+1:  add     t4, t3, a2
+    li      t0, KEXEC_STRIP_END
+    bltu    t0, t4, kexec_einval   /* strip overflow */
+    li      t0, USER_PA_OFFSET
+    add     t5, a1, t0             /* src_pa = src_uva + offset */
+    mv      t6, t3                 /* dst = staged_pa */
+    mv      t1, a2
+2:  beqz    t1, 3f
+    lbu     t0, 0(t5)
+    sb      t0, 0(t6)
+    addi    t5, t5, 1
+    addi    t6, t6, 1
+    addi    t1, t1, -1
+    j       2b
+3:  la      t0, kexec_count
+    ld      t1, 0(t0)
+    slli    t6, t1, 3
+    slli    t5, t1, 4
+    add     t6, t6, t5             /* count*24 */
+    li      t5, KEXEC_TABLE
+    add     t6, t6, t5
+    sd      a0, 0(t6)              /* dst_phys */
+    sd      t3, 8(t6)              /* staged_pa */
+    sd      a2, 16(t6)             /* len */
+    addi    t1, t1, 1
+    sd      t1, 0(t0)              /* count++ */
+    add     t3, t3, a2
+    sd      t3, 0(t2)              /* strip_next += len */
+    li      a0, 0
+    j       trap_return
+kexec_einval:
+    li      a0, -22
+    j       trap_return
+
+syscall_kexec_go:
+    /* a0=entry_pa, a1=fdt_pa, a2=magic.  Stash + re-ecall from S-mode; scause 9
+       is un-delegated so it reaches machine_trap (M-mode). */
+    li      t0, KEXEC_MAGIC
+    bne     a2, t0, kexec_einval
+    la      t0, kexec_count
+    ld      t0, 0(t0)
+    beqz    t0, kexec_einval       /* nothing staged */
+    la      t0, kexec_entry
+    sd      a0, 0(t0)
+    la      t0, kexec_fdt
+    sd      a1, 0(t0)
+    li      a7, KEXEC_MAGIC
+    ecall                          /* -> M-mode machine_trap (scause 9) */
+    j       kexec_einval           /* unreachable */
 
     /* --- Mes/tcc kaem-era syscall extensions ---
        The stage0 chain needed only the flat file set; the Mes->tcc kaem era
@@ -1005,6 +1100,34 @@ trap_halt:
     j       trap_halt
 
 machine_trap:
+    /* P0 discriminator: an ecall-from-S (mcause 9) carrying the KEXE magic in
+       a7 performs the kexec; ANY other trap keeps the original diagnostic dump
+       + poweroff (unchanged safety).  M-mode here => physical addressing. */
+    csrr    t0, mcause
+    li      t1, 9                  /* ecall from S-mode */
+    bne     t0, t1, machine_trap_dump
+    li      t1, KEXEC_MAGIC
+    bne     a7, t1, machine_trap_dump
+    /* copy the position-independent trampoline to KEXEC_TRAMP_PA (safe: below
+       every dst and the strip) then enter it. */
+    la      t0, kexec_tramp
+    la      t1, kexec_tramp_end
+    li      t2, KEXEC_TRAMP_PA
+1:  bgeu    t0, t1, 2f
+    ld      t3, 0(t0)
+    sd      t3, 0(t2)
+    addi    t0, t0, 8
+    addi    t2, t2, 8
+    j       1b
+2:  fence.i
+    li      a0, KEXEC_TABLE
+    la      t0, kexec_count; ld a1, 0(t0)
+    la      t0, kexec_entry; ld a2, 0(t0)
+    la      t0, kexec_fdt;   ld a3, 0(t0)
+    li      t0, KEXEC_TRAMP_PA
+    jr      t0
+
+machine_trap_dump:
     li      sp, KERNEL_STACK_TOP - 4096
     la      a0, machine_trap_message
     call    kernel_puts
@@ -1021,6 +1144,31 @@ machine_trap:
     li      a0, 10
     call    kernel_putc
     j       htif_poweroff
+
+    /* Relocatable M-mode trampoline (copied to KEXEC_TRAMP_PA before entry).
+       a0=table, a1=count, a2=entry, a3=fdt.  Copies each staged region to its
+       dst high->low (staged_pa > dst_phys by construction => forward-copy
+       memmove-safe), fence.i, then a0=hartid a1=fdt jr entry.  Sets NO CSR. */
+kexec_tramp:
+1:  beqz    a1, 3f
+    ld      t0, 0(a0)              /* dst */
+    ld      t1, 8(a0)              /* staged */
+    ld      t2, 16(a0)             /* len */
+2:  beqz    t2, 4f
+    lbu     t3, 0(t1)
+    sb      t3, 0(t0)
+    addi    t1, t1, 1
+    addi    t0, t0, 1
+    addi    t2, t2, -1
+    j       2b
+4:  addi    a0, a0, 24
+    addi    a1, a1, -1
+    j       1b
+3:  fence.i
+    li      a0, 0                  /* hartid */
+    mv      a1, a3                 /* fdt_pa */
+    jr      a2                     /* entry (0x80000000) */
+kexec_tramp_end:
 
 trap_return:
     ld      ra, 0(sp)
@@ -2353,6 +2501,7 @@ input_name:      .asciz "/input"
 output_name:     .asciz "/output"
 exec_target_name: .asciz "/exec-target"
 dev_hda_name:     .asciz "/dev/hda"
+dev_dtb_name:     .asciz "/dev/dtb"
 command_src:      .asciz "src"
 command_hex0:     .asciz "hex0"
 command_flush:    .asciz "f"
@@ -2432,3 +2581,8 @@ shell_resume_sp:    .dword 0
 shell_resume_ra:    .dword 0
 shell_command_ptr:  .dword 0
 shell_argument_ptr: .dword 0
+/* P0 kexec service state */
+kexec_strip_next:   .dword 0          /* 0 => init to KEXEC_STRIP on first stage */
+kexec_count:        .dword 0
+kexec_entry:        .dword 0
+kexec_fdt:          .dword 0
