@@ -1096,6 +1096,20 @@ virtio_sector:
 6:  fence   r, r
     lhu     t2, 2(t0)
     beq     t1, t2, 6b
+    /* ISR-ACK: consume-and-ack the device interrupt so the virtio interrupt
+     * line is LOW after every polled I/O, including the last one before a
+     * kexec handoff.  Without it a stale asserted line fires into the next
+     * kernel before it has mapped a virtio_blk handler; linux-6.1's SiFive
+     * PLIC driver never completes an unmapped claim, the served bit wedges
+     * (deliverable = pending & ~served), and the real completion interrupt is
+     * masked forever -> the [vda] boot freeze.  Read InterruptStatus (0x60),
+     * write it back to InterruptACK (0x64).  Harmless on qemu-virt (the driver
+     * polls and never enables interrupts); the ack targets whichever virtio
+     * base machine detection selected. */
+    la      t2, virtio_base
+    ld      t2, 0(t2)
+    lw      t3, 0x60(t2)
+    sw      t3, 0x64(t2)
     li      t0, VIRTIO_STATUS
     lbu     t1, 0(t0)
     bnez    t1, disk_failure
