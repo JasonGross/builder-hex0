@@ -7,10 +7,15 @@
     .section .text.boot
     .globl _start
 
+    /* qemu-virt machine devices. */
     .equ UART0,              0x10000000
     .equ TEST_FINISHER,      0x00100000
     .equ VIRTIO_FIRST,       0x10001000
     .equ VIRTIO_END,         0x10009000
+    /* TinyEMU machine devices, selected at runtime by detect_machine. */
+    .equ HTIF_BASE,          0x40008000
+    .equ VIRTIO_FIRST_TEMU,  0x40010000
+    .equ VIRTIO_END_TEMU,    0x40018000
     .equ ROOT_PAGE_TABLE,    0x82a00000
     .equ LOW_PAGE_TABLE,     0x82a01000
     .equ USER_PHYS,          0x80600000
@@ -53,9 +58,9 @@ _start:
     li      sp, KERNEL_STACK_TOP
     la      t0, machine_trap
     csrw    mtvec, t0
-    li      t0, UART0
-    li      t1, 3
-    sb      t1, 3(t0)              /* 8n1 */
+    call    detect_machine         /* set machine_id; grant PMP on qemu-virt */
+    call    console_init           /* 8n1 UART on qemu-virt; no-op on TinyEMU */
+    call    detect_report          /* announce the detected machine */
 
     /* A valid block header selects the internal-shell boot path. */
     call    virtio_init_optional
@@ -215,6 +220,13 @@ init_filesystem_common:
     ori     t1, t1, 0xcf           /* V R W X A D */
     sd      t1, 16(t0)
 
+    /* root[1]: identity-map 0x40000000..0x7fffffff.  Harmless on qemu-virt (an
+       unused range); on TinyEMU it covers HTIF @0x40008000 and virtio MMIO. */
+    li      t1, 0x40000000
+    srli    t1, t1, 2
+    ori     t1, t1, 0xcf           /* V R W X A D */
+    sd      t1, 8(t0)
+
     li      t0, LOW_PAGE_TABLE
     li      t1, 0xcf
     sd      t1, 0(t0)              /* VA 0..2 MiB identity: finisher */
@@ -246,18 +258,16 @@ init_filesystem_common:
     addi    t2, t2, -1
     bnez    t2, 8b
 
-    /* VA 0x10000000 -> PA 0x10000000, supervisor MMIO. */
+    /* VA 0x10000000 -> PA 0x10000000, supervisor MMIO (qemu-virt UART + virtio;
+       an unused, harmless leaf on TinyEMU, whose MMIO is under root[1]). */
     li      t0, LOW_PAGE_TABLE
     li      t1, UART0
     srli    t1, t1, 2
     ori     t1, t1, 0xcf
     sd      t1, 1024(t0)           /* level-1 index 128 */
 
-    /* Give S/U modes access to all physical addresses. */
-    li      t0, -1
-    csrw    pmpaddr0, t0
-    li      t0, 0x0f               /* TOR, R/W/X */
-    csrw    pmpcfg0, t0
+    /* PMP granting S/U all-physical access was already done by detect_machine
+       on qemu-virt; TinyEMU has no PMP CSRs and enforces no PMP. */
 
     /* Delegate user ecalls to supervisor mode and enter S mode. */
     li      t0, 1 << 8
@@ -389,11 +399,16 @@ syscall_write:
     li      a0, 0
 2:  beqz    t1, trap_return
     lbu     a3, 0(t0)
-    li      t2, UART0
-3:  lbu     a4, 5(t2)
-    andi    a4, a4, 0x20
-    beqz    a4, 3b
-    sb      a3, 0(t2)
+    addi    sp, sp, -32            /* kernel_putc clobbers t0,t1,a0 (and ra) */
+    sd      t0, 0(sp)
+    sd      t1, 8(sp)
+    sd      a0, 16(sp)
+    mv      a0, a3
+    call    kernel_putc
+    ld      t0, 0(sp)
+    ld      t1, 8(sp)
+    ld      a0, 16(sp)
+    addi    sp, sp, 32
     addi    t0, t0, 1
     addi    t1, t1, -1
     addi    a0, a0, 1
@@ -788,13 +803,7 @@ syscall_exit:
     call    kernel_puts
     li      a0, 0
 syscall_exit_finish:
-    li      t0, TEST_FINISHER
-    beqz    a0, 1f
-    slli    a0, a0, 16
-    li      t1, 0x3333
-    or      a0, a0, t1
-    sw      a0, 0(t0)
-    j       trap_halt
+    j       poweroff               /* a0 = exit status */
 
 restore_shell:
     sd      zero, 0(t0)
@@ -805,9 +814,6 @@ restore_shell:
     ld      t0, 0(t0)
     mv      a0, t2
     jr      t0
-1:  li      t1, 0x5555
-    sw      t1, 0(t0)
-    j       trap_halt
 
 restore_parent:
     /* Restore shared process state before replacing the active trap frame. */
@@ -855,12 +861,8 @@ restore_parent:
     j       trap_return
 
 trap_failure:
-    li      t0, TEST_FINISHER
-    li      t1, 0x13333
-    sw      t1, 0(t0)
-trap_halt:
-    wfi
-    j       trap_halt
+    li      a0, 1                  /* qemu-virt: (1<<16)|0x3333 = 0x13333 fail */
+    j       poweroff
 
 machine_trap:
     li      sp, KERNEL_STACK_TOP - 4096
@@ -878,10 +880,8 @@ machine_trap:
     call    kernel_puthex64
     li      a0, 10
     call    kernel_putc
-    li      t0, TEST_FINISHER
-    li      t1, 0x13333
-    sw      t1, 0(t0)
-    j       trap_halt
+    li      a0, 1
+    j       poweroff
 
 trap_return:
     ld      ra, 0(sp)
@@ -919,8 +919,13 @@ trap_return:
 
 /* Optional virtio-mmio block device, split queue. */
 virtio_init_optional:
-    li      t0, VIRTIO_FIRST
+    la      t1, machine_id
+    lbu     t1, 0(t1)
+    li      t0, VIRTIO_FIRST       /* qemu-virt window */
     li      t3, VIRTIO_END
+    beqz    t1, 1f
+    li      t0, VIRTIO_FIRST_TEMU  /* TinyEMU window */
+    li      t3, VIRTIO_END_TEMU
 1:  bgeu    t0, t3, 9f
     lw      t1, 0(t0)
     li      t2, 0x74726976
@@ -1189,12 +1194,21 @@ copy_string:
     bnez    t2, 1b
     ret
 
-kernel_putc:
-    li      t0, UART0
-1:  lbu     t1, 5(t0)
+kernel_putc:                       /* a0 = byte; clobbers t0,t1; preserves a0 */
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, 1f
+    li      t0, UART0              /* qemu-virt 16550: poll THR-empty, then write */
+2:  lbu     t1, 5(t0)
     andi    t1, t1, 0x20
-    beqz    t1, 1b
+    beqz    t1, 2b
     sb      a0, 0(t0)
+    ret
+1:  li      t0, HTIF_BASE          /* TinyEMU HTIF: tohost low=char, high=putchar */
+    andi    t1, a0, 0xff
+    sw      t1, 0(t0)
+    li      t1, 0x01010000
+    sw      t1, 4(t0)
     ret
 
 kernel_puthex64:
@@ -1220,17 +1234,105 @@ kernel_puthex64:
     addi    sp, sp, 32
     ret
 
-kernel_puts:
-1:  lbu     t1, 0(t0)
-    beqz    t1, 3f
-    li      t2, UART0
-2:  lbu     t3, 5(t2)
-    andi    t3, t3, 0x20
-    beqz    t3, 2b
-    sb      t1, 0(t2)
-    addi    t0, t0, 1
+kernel_puts:                       /* t0 = asciz ptr; preserves a0 */
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      a0, 16(sp)
+    mv      s0, t0
+1:  lbu     a0, 0(s0)
+    beqz    a0, 3f
+    call    kernel_putc
+    addi    s0, s0, 1
     j       1b
-3:  ret
+3:  ld      a0, 16(sp)
+    ld      s0, 8(sp)
+    ld      ra, 0(sp)
+    addi    sp, sp, 32
+    ret
+
+/* --- machine abstraction: qemu-virt vs TinyEMU, selected once at boot ------- */
+
+/* detect_machine: probe whether the PMP CSRs exist.  qemu-virt implements PMP,
+   so `csrw pmpaddr0/pmpcfg0` completes -- and we take that write as the grant
+   giving S/U access to all physical memory.  TinyEMU implements no PMP CSRs, so
+   the write traps illegal and probe_trap records machine_id=1 and skips it.
+   Clobbers t0,t1.  Restores mtvec = machine_trap on return. */
+detect_machine:
+    la      t0, machine_id
+    sb      zero, 0(t0)            /* assume qemu-virt (0) */
+    la      t0, probe_trap
+    csrw    mtvec, t0
+    li      t0, -1
+    csrw    pmpaddr0, t0           /* traps illegal on TinyEMU */
+    li      t0, 0x0f               /* TOR, R/W/X */
+    csrw    pmpcfg0, t0            /* traps illegal on TinyEMU */
+    la      t0, machine_trap
+    csrw    mtvec, t0
+    ret
+
+    .balign 4
+probe_trap:
+    la      t0, machine_id
+    li      t1, 1
+    sb      t1, 0(t0)              /* TinyEMU: no PMP CSRs */
+    csrr    t0, mepc
+    addi    t0, t0, 4
+    csrw    mepc, t0               /* resume past the illegal csrw */
+    mret
+
+/* console_init: qemu-virt needs 8n1 UART setup; TinyEMU HTIF needs none. */
+console_init:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Lci_done
+    li      t0, UART0
+    li      t1, 3
+    sb      t1, 3(t0)              /* 8n1 */
+.Lci_done:
+    ret
+
+/* detect_report: print which machine was selected.  The line only reaches a
+   console via the branch detect_machine chose, so its presence in a given
+   emulator's log is itself proof the probe discriminated correctly. */
+detect_report:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Ldr_temu
+    la      t0, detect_qemu_message
+    j       kernel_puts
+.Ldr_temu:
+    la      t0, detect_temu_message
+    j       kernel_puts
+
+/* poweroff(a0 = exit status): halt the machine.
+   qemu-virt SiFive test finisher: a0==0 -> 0x5555 pass; else (a0<<16)|0x3333.
+   TinyEMU HTIF: tohost=1 -> "Power off." exit(0) (no exit-code encoding). */
+poweroff:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, htif_poweroff
+    li      t0, TEST_FINISHER
+    beqz    a0, .Lpo_pass
+    slli    a0, a0, 16
+    li      t1, 0x3333
+    or      a0, a0, t1
+    sw      a0, 0(t0)
+    j       .Lpo_halt
+.Lpo_pass:
+    li      t1, 0x5555
+    sw      t1, 0(t0)
+.Lpo_halt:
+    wfi
+    j       .Lpo_halt
+htif_poweroff:
+    li      t0, HTIF_BASE
+    li      t1, 1
+    sw      t1, 0(t0)
+    sw      zero, 4(t0)
+.Lhtif_halt:
+    wfi
+    j       .Lhtif_halt
 
 /* t0=source, t1=destination, t2=64-bit word count */
 copy_words:
@@ -2216,6 +2318,8 @@ machine_trap_message: .asciz "builder-hex0-riscv64 machine trap: mcause/mepc/mtv
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
+detect_qemu_message: .asciz "builder-hex0-riscv64: detected qemu-virt (PMP present)\n"
+detect_temu_message: .asciz "builder-hex0-riscv64: detected TinyEMU (no PMP)\n"
 
     .balign 8
 builtin_exec_elf:
@@ -2282,3 +2386,4 @@ shell_resume_sp:    .dword 0
 shell_resume_ra:    .dword 0
 shell_command_ptr:  .dword 0
 shell_argument_ptr: .dword 0
+machine_id:         .dword 0       /* 0 = qemu-virt, 1 = TinyEMU (set at boot) */
