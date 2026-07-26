@@ -56,6 +56,32 @@ riscv64-stage2-oracle:
 		> BUILD/builder-hex0-riscv64-stage2-from-hex0.bin
 	cmp BUILD/builder-hex0-riscv64-stage2.bin BUILD/builder-hex0-riscv64-stage2-from-hex0.bin
 
+riscv64-tinyemu-stage1: BUILD/builder-hex0-riscv64-tinyemu-stage1.bin
+
+BUILD/builder-hex0-riscv64-tinyemu-stage1.bin: builder-hex0-riscv64-tinyemu-stage1.hex0 | BUILD
+	cut builder-hex0-riscv64-tinyemu-stage1.hex0 -f1 -d'#' | cut -f1 -d';' | $(XXD) -r -p > $@
+
+riscv64-tinyemu-stage1-oracle: riscv64-tinyemu-stage1
+	SEED=builder-hex0-riscv64-tinyemu-stage1 ./build-riscv64-stage1.sh
+	./riscv64-stage1-to-hex0.sh \
+		BUILD/builder-hex0-riscv64-tinyemu-stage1-oracle.elf \
+		BUILD/builder-hex0-riscv64-tinyemu-stage1-generated.hex0
+	diff builder-hex0-riscv64-tinyemu-stage1.hex0 BUILD/builder-hex0-riscv64-tinyemu-stage1-generated.hex0
+	cmp BUILD/builder-hex0-riscv64-tinyemu-stage1.bin BUILD/builder-hex0-riscv64-tinyemu-stage1-oracle.bin
+
+riscv64-tinyemu-stage2-oracle:
+	SEED=builder-hex0-riscv64-tinyemu-stage2 ./build-riscv64-stage2.sh
+	TITLE='builder-hex0 riscv64 stage 2' DATA_TITLE='non-executable data' RAW_TEXT=1 \
+		./riscv64-stage1-to-hex0.sh \
+		BUILD/builder-hex0-riscv64-tinyemu-stage2.elf \
+		BUILD/builder-hex0-riscv64-tinyemu-stage2-generated.hex0
+	diff builder-hex0-riscv64-tinyemu-stage2.hex0 BUILD/builder-hex0-riscv64-tinyemu-stage2-generated.hex0
+	cut builder-hex0-riscv64-tinyemu-stage2.hex0 -f1 -d'#' | cut -f1 -d';' | $(XXD) -r -p \
+		> BUILD/builder-hex0-riscv64-tinyemu-stage2-from-hex0.bin
+	cmp BUILD/builder-hex0-riscv64-tinyemu-stage2.bin BUILD/builder-hex0-riscv64-tinyemu-stage2-from-hex0.bin
+
+test-riscv64-tinyemu: riscv64-tinyemu-stage1-oracle riscv64-tinyemu-stage2-oracle
+
 test-riscv64-stage1: riscv64-stage1-oracle riscv64-stage2-oracle
 	./test-riscv64-stage1.sh
 
@@ -166,4 +192,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-shell test-riscv64-stage2-chain test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost
+.PHONY: clean riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-shell test-riscv64-stage2-chain test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost riscv64-tinyemu-stage1 riscv64-tinyemu-stage1-oracle riscv64-tinyemu-stage2-oracle test-riscv64-tinyemu

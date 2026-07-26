@@ -48,6 +48,61 @@ seed through QEMU's standard `-kernel` interface is the native equivalent of
 loading the x86 stage-1 seed through a BIOS. Console and disk operations remain
 inside the auditable seed rather than depending on firmware services.
 
+## Second machine target: TinyEMU
+
+`builder-hex0-riscv64-tinyemu-stage1.S` and
+`builder-hex0-riscv64-tinyemu-stage2.S`, with their checked-in hex0 seeds, are
+the same builder retargeted to TinyEMU's riscv64 machine. Everything above
+about the builder itself — the disk control blocks, the memory filesystem, the
+syscall set, the ELF64 loader, the internal shell — is unchanged; only the
+device interfaces differ.
+
+| concern | QEMU `virt` | TinyEMU |
+| --- | --- | --- |
+| console | 16550 UART at `0x10000000` | HTIF at `0x40008000` |
+| power off | sifive test finisher at `0x00100000` | HTIF `tohost = 1` |
+| virtio-mmio block | scan from `0x10001000` | scan from `0x40010000` (console is slot 0, block slot 1; found by device id 2) |
+| MMIO mapping (stage 2) | Sv39 leaf for `0x10000000` | one Sv39 root gigapage covering `0x40000000..0x7fffffff` |
+| PMP | `csrw pmpaddr0` / `pmpcfg0` grant | removed |
+
+The PMP removal is the one non-obvious item: TinyEMU implements no PMP at all,
+so those CSRs raise illegal-instruction, and it enforces none either, which
+makes the grant both illegal and unnecessary there.
+
+TinyEMU loads a flat `bios` image at the RAM base `0x80000000` and jumps to it,
+which is exactly the "seed as boot payload" model the QEMU `-kernel` path uses.
+A configuration file is the whole invocation:
+
+```
+{ version: 1, machine: "riscv64", memory_size: 128,
+  bios:   "BUILD/builder-hex0-riscv64-tinyemu-stage2.bin",
+  drive0: { file: "chain.img" } }
+```
+
+```sh
+temu -rw config.cfg
+```
+
+The `-rw` flag is required and is easy to lose an afternoon to: TinyEMU defaults
+drives to a copy-on-write snapshot, so without it the builder's flushed output
+goes to an in-memory overlay and silently never reaches the file. TinyEMU also
+resolves `drive0` paths relative to the configuration file's directory.
+
+The oracle targets work the same way as for the QEMU seeds and need only
+riscv64 binutils — no emulator:
+
+```sh
+make riscv64-tinyemu-stage1-oracle
+make riscv64-tinyemu-stage2-oracle
+make test-riscv64-tinyemu            # both of the above
+```
+
+Because the retarget changes only how the builder performs I/O, and not the
+bytes the stage0 tools emit, the stage0-posix chain produces identical output
+on both machines: M2-Planet comes out at 361,701 bytes with SHA-256
+`cbc35afec2baef4a31b5875b0b3e08c4eb03d6974e0b57c7cd905e7244b92a17` under
+TinyEMU, matching the QEMU `virt` result recorded above.
+
 ## Disk control block
 
 Stage 1 reads sector zero as four little-endian 64-bit words:
