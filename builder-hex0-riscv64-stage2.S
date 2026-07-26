@@ -278,6 +278,13 @@ init_filesystem_common:
     and     t0, t0, t1
     li      t1, 1 << 11            /* MPP = S */
     or      t0, t0, t1
+    /* Enable the FPU: mstatus.FS = Initial (01).  The tcc era is the route's
+       first hardware-FP code (MesCC emits none, so every mes-era binary is
+       FP-free by construction; tcc-built binaries use F/D).  With FS=Off any
+       FP instruction traps illegal.  supervisor_entry's sstatus RMW preserves
+       bits 13-14; hardware sets FS=Dirty on first FP use. */
+    li      t1, 1 << 13            /* FS = Initial */
+    or      t0, t0, t1
     csrw    mstatus, t0
     la      t0, supervisor_entry
     csrw    mepc, t0
@@ -866,7 +873,8 @@ trap_failure:
 
 machine_trap:
     li      sp, KERNEL_STACK_TOP - 4096
-    la      a0, machine_trap_message
+    la      t0, machine_trap_message  /* kernel_puts reads its string from t0
+                                         (la a0 was a latent no-print bug) */
     call    kernel_puts
     csrr    a0, mcause
     call    kernel_puthex64
