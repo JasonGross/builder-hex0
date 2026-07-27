@@ -13,10 +13,15 @@
     .section .text.boot
     .globl _start
 
+    /* qemu-virt machine devices. */
     .equ UART0,             0x10000000
     .equ TEST_FINISHER,     0x00100000
     .equ VIRTIO_FIRST,      0x10001000
     .equ VIRTIO_END,        0x10009000
+    /* TinyEMU machine devices, selected at runtime by detect_machine. */
+    .equ HTIF_BASE,         0x40008000
+    .equ VIRTIO_FIRST_TEMU, 0x40010000
+    .equ VIRTIO_END_TEMU,   0x40018000
     .equ VIRTQ_DESC,        0x81000000
     .equ VIRTQ_AVAIL,       0x81001000
     .equ VIRTQ_USED,        0x81002000
@@ -30,6 +35,7 @@
 
 _start:
     li      sp, STACK_TOP
+    call    detect_machine         /* set machine_id (qemu-virt vs TinyEMU) */
     call    uart_init
     la      a0, banner
     call    uart_puts
@@ -76,19 +82,32 @@ bad_header:
     li      a0, 1
     j       poweroff_code
 
-/* 16550 UART ------------------------------------------------------------- */
+/* Console: 16550 UART (qemu-virt) or HTIF (TinyEMU), by machine_id ---------- */
 uart_init:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Lui_done
     li      t0, UART0
     li      t1, 3
     sb      t1, 3(t0)              /* 8n1 */
+.Lui_done:
     ret
 
-uart_putc:
-    li      t0, UART0
-1:  lbu     t1, 5(t0)
+uart_putc:                         /* a0 = byte; clobbers t0,t1; preserves a0 */
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, 1f
+    li      t0, UART0              /* qemu-virt 16550: poll THR-empty, then write */
+2:  lbu     t1, 5(t0)
     andi    t1, t1, 0x20
-    beqz    t1, 1b
+    beqz    t1, 2b
     sb      a0, 0(t0)
+    ret
+1:  li      t0, HTIF_BASE          /* TinyEMU HTIF: tohost low=char, high=putchar */
+    andi    t1, a0, 0xff
+    sw      t1, 0(t0)
+    li      t1, 0x01010000
+    sw      t1, 4(t0)
     ret
 
 uart_puts:
@@ -131,8 +150,13 @@ uart_puthex64:
 
 /* virtio-mmio block device, split queue --------------------------------- */
 virtio_init:
-    li      t0, VIRTIO_FIRST
+    la      t1, machine_id
+    lbu     t1, 0(t1)
+    li      t0, VIRTIO_FIRST       /* qemu-virt window */
     li      t3, VIRTIO_END
+    beqz    t1, 0f
+    li      t0, VIRTIO_FIRST_TEMU  /* TinyEMU window */
+    li      t3, VIRTIO_END_TEMU
 0:  bgeu    t0, t3, no_virtio
     lw      t1, 0(t0)
     li      t2, 0x74726976
@@ -403,13 +427,19 @@ hex0_compile:
 8:  sub     a0, t2, a2
     ret
 
-poweroff:
+poweroff:                          /* success */
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Lhtif_off
     li      t0, TEST_FINISHER
     li      t1, 0x5555
     sw      t1, 0(t0)
 1:  wfi
     j       1b
-poweroff_code:
+poweroff_code:                     /* failure, a0 = code */
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Lhtif_off
     li      t0, TEST_FINISHER
     slli    a0, a0, 16
     li      t1, 0x3333
@@ -417,6 +447,42 @@ poweroff_code:
     sw      a0, 0(t0)
 2:  wfi
     j       2b
+.Lhtif_off:                        /* TinyEMU: tohost=1 -> "Power off." exit(0) */
+    li      t0, HTIF_BASE
+    li      t1, 1
+    sw      t1, 0(t0)
+    sw      zero, 4(t0)
+3:  wfi
+    j       3b
+
+/* --- machine detection: qemu-virt vs TinyEMU (mirrors stage2) ------------- */
+/* detect_machine: probe whether the PMP CSRs exist.  qemu-virt implements PMP
+   so `csrw pmpaddr0/pmpcfg0` completes; TinyEMU has no PMP CSRs so the write
+   traps illegal and probe_trap records machine_id=1.  Needs Zicsr (M-mode trap
+   CSRs), which TinyEMU implements -- only the PMP CSRs are absent.  Clobbers
+   t0,t1,t2; restores the reset mtvec on return. */
+detect_machine:
+    la      t0, machine_id
+    sb      zero, 0(t0)            /* assume qemu-virt (0) */
+    csrr    t2, mtvec              /* save (stage1 installs no other handler) */
+    la      t0, probe_trap
+    csrw    mtvec, t0
+    li      t0, -1
+    csrw    pmpaddr0, t0           /* traps illegal on TinyEMU */
+    li      t0, 0x0f
+    csrw    pmpcfg0, t0            /* traps illegal on TinyEMU */
+    csrw    mtvec, t2              /* restore */
+    ret
+
+    .balign 4
+probe_trap:
+    la      t0, machine_id
+    li      t1, 1
+    sb      t1, 0(t0)              /* TinyEMU: no PMP CSRs */
+    csrr    t0, mepc
+    addi    t0, t0, 4
+    csrw    mepc, t0               /* resume past the illegal csrw */
+    mret
 
     .section .rodata
 banner:          .asciz "builder-hex0-riscv64 stage1\n"
@@ -424,3 +490,7 @@ success:         .asciz "compiled bytes: 0x"
 bad_header_msg:  .asciz "bad builder disk header\n"
 no_virtio_msg:   .asciz "virtio block device unavailable\n"
 disk_error_msg:  .asciz "virtio block request failed\n"
+/* Runtime machine selector (0 = qemu-virt, 1 = TinyEMU), set by detect_machine.
+   A single byte at the tail of the image; stage1 runs M-mode-bare with no memory
+   protection, so this nominally-read-only location is writable. */
+machine_id:      .byte 0

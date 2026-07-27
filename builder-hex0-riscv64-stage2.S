@@ -7,10 +7,15 @@
     .section .text.boot
     .globl _start
 
+    /* qemu-virt machine devices. */
     .equ UART0,              0x10000000
     .equ TEST_FINISHER,      0x00100000
     .equ VIRTIO_FIRST,       0x10001000
     .equ VIRTIO_END,         0x10009000
+    /* TinyEMU machine devices, selected at runtime by detect_machine. */
+    .equ HTIF_BASE,          0x40008000
+    .equ VIRTIO_FIRST_TEMU,  0x40010000
+    .equ VIRTIO_END_TEMU,    0x40018000
     .equ ROOT_PAGE_TABLE,    0x82a00000
     .equ LOW_PAGE_TABLE,     0x82a01000
     .equ USER_PHYS,          0x80600000
@@ -35,6 +40,19 @@
     .equ SECTOR_BUFFER,      0x83804000
     .equ FILE_DATA,          0x84000000
     .equ FILE_DATA_TOP,      0x85000000
+    /* kexec service.  The staging strip and relocated trampoline live in the
+       root[3] gigapage (0xc0000000..0xffffffff) that the service adds to the
+       page tables; they sit clear of the census structures (which top out below
+       0x88000000) and are only backed when kexec is actually invoked, so the
+       stage0-posix census chain -- which never touches them -- runs unchanged on
+       a small machine.  KEXEC_TABLE is a free page in the already-identity-mapped
+       root[2] gigapage. */
+    .equ KEXEC_TABLE,        0xb901d000   /* stage table (root[2], S-accessible) */
+    .equ KEXEC_TRAMP_PA,     0xf8000000   /* trampoline copy target (root[3]) */
+    .equ KEXEC_STRIP,        0xfa000000   /* staging strip base (bumps upward) */
+    .equ KEXEC_STRIP_END,    0xfd000000   /* strip ceiling (~48 MiB) */
+    .equ KEXEC_MAGIC,        0x4B455845   /* "KEXE" a7 discriminator */
+    .equ USER_PA_OFFSET,     0x80000000   /* src_uva + this = src_pa */
     .equ PARENT_FDS,         0x83f00000
     .equ PARENT_FRAME,       0x83f02000
     .equ EXEC_ARGV,          0x83f04000
@@ -53,9 +71,9 @@ _start:
     li      sp, KERNEL_STACK_TOP
     la      t0, machine_trap
     csrw    mtvec, t0
-    li      t0, UART0
-    li      t1, 3
-    sb      t1, 3(t0)              /* 8n1 */
+    call    detect_machine         /* set machine_id; grant PMP on qemu-virt */
+    call    console_init           /* 8n1 UART on qemu-virt; no-op on TinyEMU */
+    call    detect_report          /* announce the detected machine */
 
     /* A valid block header selects the internal-shell boot path. */
     call    virtio_init_optional
@@ -161,7 +179,30 @@ image_loaded:
     j       init_filesystem_common
 
 init_empty_filesystem:
+    /* On TinyEMU expose the pristine FDT (always at PA 0x1040, never
+       overwritten) as a read-only /dev/dtb so a kexec loader can read and
+       rebuild it.  qemu-virt has no FDT at 0x1040 (it is below RAM), so skip it
+       there and start with an empty table.  We are in M mode here (pre-mret),
+       so 0x1040 is a direct physical read. */
+    la      t2, machine_id
+    ld      t2, 0(t2)
+    beqz    t2, 9f                 /* qemu-virt: empty filesystem */
+    li      t2, FILE_TABLE
+    la      t3, dev_dtb_name
+    sd      t3, 0(t2)              /* name -> "/dev/dtb" */
+    li      t3, 0x1040
+    sd      t3, 8(t2)              /* data -> pristine FDT @ PA 0x1040 */
+    lbu     t4, 4(t3); slli t4, t4, 24
+    lbu     t5, 5(t3); slli t5, t5, 16; or t4, t4, t5
+    lbu     t5, 6(t3); slli t5, t5,  8; or t4, t4, t5
+    lbu     t5, 7(t3);                   or t4, t4, t5
+    sd      t4, 16(t2)             /* length = FDT totalsize (big-endian at +4) */
+    sd      t4, 24(t2)             /* capacity */
     la      t2, file_count
+    li      t3, 1
+    sd      t3, 0(t2)              /* one built-in file: /dev/dtb */
+    j       init_filesystem_common
+9:  la      t2, file_count
     sd      zero, 0(t2)
 
 init_filesystem_common:
@@ -215,6 +256,21 @@ init_filesystem_common:
     ori     t1, t1, 0xcf           /* V R W X A D */
     sd      t1, 16(t0)
 
+    /* root[3]: identity-map 0xc0000000..0xffffffff so the kexec service's S-mode
+       staging writes (strip at 0xfa000000) resolve.  Present but never walked
+       unless kexec is invoked; the census chain does not touch this range. */
+    li      t1, 0xc0000000
+    srli    t1, t1, 2
+    ori     t1, t1, 0xcf           /* V R W X A D */
+    sd      t1, 24(t0)
+
+    /* root[1]: identity-map 0x40000000..0x7fffffff.  Harmless on qemu-virt (an
+       unused range); on TinyEMU it covers HTIF @0x40008000 and virtio MMIO. */
+    li      t1, 0x40000000
+    srli    t1, t1, 2
+    ori     t1, t1, 0xcf           /* V R W X A D */
+    sd      t1, 8(t0)
+
     li      t0, LOW_PAGE_TABLE
     li      t1, 0xcf
     sd      t1, 0(t0)              /* VA 0..2 MiB identity: finisher */
@@ -246,18 +302,16 @@ init_filesystem_common:
     addi    t2, t2, -1
     bnez    t2, 8b
 
-    /* VA 0x10000000 -> PA 0x10000000, supervisor MMIO. */
+    /* VA 0x10000000 -> PA 0x10000000, supervisor MMIO (qemu-virt UART + virtio;
+       an unused, harmless leaf on TinyEMU, whose MMIO is under root[1]). */
     li      t0, LOW_PAGE_TABLE
     li      t1, UART0
     srli    t1, t1, 2
     ori     t1, t1, 0xcf
     sd      t1, 1024(t0)           /* level-1 index 128 */
 
-    /* Give S/U modes access to all physical addresses. */
-    li      t0, -1
-    csrw    pmpaddr0, t0
-    li      t0, 0x0f               /* TOR, R/W/X */
-    csrw    pmpcfg0, t0
+    /* PMP granting S/U all-physical access was already done by detect_machine
+       on qemu-virt; TinyEMU has no PMP CSRs and enforces no PMP. */
 
     /* Delegate user ecalls to supervisor mode and enter S mode. */
     li      t0, 1 << 8
@@ -267,6 +321,13 @@ init_filesystem_common:
     li      t1, ~(3 << 11)
     and     t0, t0, t1
     li      t1, 1 << 11            /* MPP = S */
+    or      t0, t0, t1
+    /* Enable the FPU: mstatus.FS = Initial (01).  The tcc era is the route's
+       first hardware-FP code (MesCC emits none, so every mes-era binary is
+       FP-free by construction; tcc-built binaries use F/D).  With FS=Off any
+       FP instruction traps illegal.  supervisor_entry's sstatus RMW preserves
+       bits 13-14; hardware sets FS=Dirty on first FP use. */
+    li      t1, 1 << 13            /* FS = Initial */
     or      t0, t0, t1
     csrw    mstatus, t0
     la      t0, supervisor_entry
@@ -375,8 +436,77 @@ supervisor_trap:
     beq     a7, t0, syscall_wait4
     li      t0, 93                 /* Linux riscv64 exit */
     beq     a7, t0, syscall_exit
+    li      t0, 500                /* private kexec_stage */
+    beq     a7, t0, syscall_kexec_stage
+    li      t0, 501                /* private kexec_go */
+    beq     a7, t0, syscall_kexec_go
     li      a0, -38                /* -ENOSYS */
     j       trap_return
+
+    /* --- kexec service handlers (S-mode; kept near the dispatch so the branch
+       offsets stay in range).  500 kexec_stage copies a user region into the
+       staging strip and records it; 501 kexec_go re-ecalls from S with the KEXE
+       magic so an un-delegated scause 9 reaches machine_trap (M-mode). --- */
+syscall_kexec_stage:
+    /* a0=dst_phys, a1=src_uva, a2=len.  Returns 0 / -EINVAL(-22). */
+    li      t0, USER_VIRT
+    bltu    a1, t0, kexec_einval
+    li      t0, USER_STACK_TOP
+    add     t1, a1, a2
+    bltu    t0, t1, kexec_einval   /* src end past the user window */
+    la      t2, kexec_strip_next
+    ld      t3, 0(t2)
+    bnez    t3, 1f
+    li      t3, KEXEC_STRIP        /* first call: init to base */
+1:  add     t4, t3, a2
+    li      t0, KEXEC_STRIP_END
+    bltu    t0, t4, kexec_einval   /* strip overflow */
+    li      t0, USER_PA_OFFSET
+    add     t5, a1, t0             /* src_pa = src_uva + offset */
+    mv      t6, t3                 /* dst = staged_pa */
+    mv      t1, a2
+2:  beqz    t1, 3f
+    lbu     t0, 0(t5)
+    sb      t0, 0(t6)
+    addi    t5, t5, 1
+    addi    t6, t6, 1
+    addi    t1, t1, -1
+    j       2b
+3:  la      t0, kexec_count
+    ld      t1, 0(t0)
+    slli    t6, t1, 3
+    slli    t5, t1, 4
+    add     t6, t6, t5             /* count*24 */
+    li      t5, KEXEC_TABLE
+    add     t6, t6, t5
+    sd      a0, 0(t6)              /* dst_phys */
+    sd      t3, 8(t6)              /* staged_pa */
+    sd      a2, 16(t6)             /* len */
+    addi    t1, t1, 1
+    sd      t1, 0(t0)              /* count++ */
+    add     t3, t3, a2
+    sd      t3, 0(t2)              /* strip_next += len */
+    li      a0, 0
+    j       trap_return
+kexec_einval:
+    li      a0, -22
+    j       trap_return
+
+syscall_kexec_go:
+    /* a0=entry_pa, a1=fdt_pa, a2=magic.  Stash + re-ecall from S-mode; scause 9
+       is un-delegated so it reaches machine_trap (M-mode). */
+    li      t0, KEXEC_MAGIC
+    bne     a2, t0, kexec_einval
+    la      t0, kexec_count
+    ld      t0, 0(t0)
+    beqz    t0, kexec_einval       /* nothing staged */
+    la      t0, kexec_entry
+    sd      a0, 0(t0)
+    la      t0, kexec_fdt
+    sd      a1, 0(t0)
+    li      a7, KEXEC_MAGIC
+    ecall                          /* -> M-mode machine_trap (scause 9) */
+    j       kexec_einval           /* unreachable */
 
 syscall_write:
     li      t0, 1
@@ -389,11 +519,16 @@ syscall_write:
     li      a0, 0
 2:  beqz    t1, trap_return
     lbu     a3, 0(t0)
-    li      t2, UART0
-3:  lbu     a4, 5(t2)
-    andi    a4, a4, 0x20
-    beqz    a4, 3b
-    sb      a3, 0(t2)
+    addi    sp, sp, -32            /* kernel_putc clobbers t0,t1,a0 (and ra) */
+    sd      t0, 0(sp)
+    sd      t1, 8(sp)
+    sd      a0, 16(sp)
+    mv      a0, a3
+    call    kernel_putc
+    ld      t0, 0(sp)
+    ld      t1, 8(sp)
+    ld      a0, 16(sp)
+    addi    sp, sp, 32
     addi    t0, t0, 1
     addi    t1, t1, -1
     addi    a0, a0, 1
@@ -788,13 +923,7 @@ syscall_exit:
     call    kernel_puts
     li      a0, 0
 syscall_exit_finish:
-    li      t0, TEST_FINISHER
-    beqz    a0, 1f
-    slli    a0, a0, 16
-    li      t1, 0x3333
-    or      a0, a0, t1
-    sw      a0, 0(t0)
-    j       trap_halt
+    j       poweroff               /* a0 = exit status */
 
 restore_shell:
     sd      zero, 0(t0)
@@ -805,9 +934,6 @@ restore_shell:
     ld      t0, 0(t0)
     mv      a0, t2
     jr      t0
-1:  li      t1, 0x5555
-    sw      t1, 0(t0)
-    j       trap_halt
 
 restore_parent:
     /* Restore shared process state before replacing the active trap frame. */
@@ -855,16 +981,41 @@ restore_parent:
     j       trap_return
 
 trap_failure:
-    li      t0, TEST_FINISHER
-    li      t1, 0x13333
-    sw      t1, 0(t0)
-trap_halt:
-    wfi
-    j       trap_halt
+    li      a0, 1                  /* qemu-virt: (1<<16)|0x3333 = 0x13333 fail */
+    j       poweroff
 
 machine_trap:
+    /* kexec discriminator: an ecall-from-S (mcause 9) carrying the KEXE magic in
+       a7 performs the kexec; ANY other trap keeps the diagnostic dump + poweroff
+       (unchanged safety).  M-mode here => physical addressing. */
+    csrr    t0, mcause
+    li      t1, 9                  /* ecall from S-mode */
+    bne     t0, t1, machine_trap_dump
+    li      t1, KEXEC_MAGIC
+    bne     a7, t1, machine_trap_dump
+    /* copy the position-independent trampoline to KEXEC_TRAMP_PA (clear of every
+       dst and the strip) then enter it. */
+    la      t0, kexec_tramp
+    la      t1, kexec_tramp_end
+    li      t2, KEXEC_TRAMP_PA
+1:  bgeu    t0, t1, 2f
+    ld      t3, 0(t0)
+    sd      t3, 0(t2)
+    addi    t0, t0, 8
+    addi    t2, t2, 8
+    j       1b
+2:  fence.i
+    li      a0, KEXEC_TABLE
+    la      t0, kexec_count; ld a1, 0(t0)
+    la      t0, kexec_entry; ld a2, 0(t0)
+    la      t0, kexec_fdt;   ld a3, 0(t0)
+    li      t0, KEXEC_TRAMP_PA
+    jr      t0
+
+machine_trap_dump:
     li      sp, KERNEL_STACK_TOP - 4096
-    la      a0, machine_trap_message
+    la      t0, machine_trap_message  /* kernel_puts reads its string from t0
+                                         (la a0 was a latent no-print bug) */
     call    kernel_puts
     csrr    a0, mcause
     call    kernel_puthex64
@@ -878,10 +1029,32 @@ machine_trap:
     call    kernel_puthex64
     li      a0, 10
     call    kernel_putc
-    li      t0, TEST_FINISHER
-    li      t1, 0x13333
-    sw      t1, 0(t0)
-    j       trap_halt
+    li      a0, 1
+    j       poweroff
+
+    /* Relocatable M-mode trampoline (copied to KEXEC_TRAMP_PA before entry).
+       a0=table, a1=count, a2=entry, a3=fdt.  Copies each staged region to its
+       dst, fence.i, then a0=hartid a1=fdt jr entry.  Sets NO CSR. */
+kexec_tramp:
+1:  beqz    a1, 3f
+    ld      t0, 0(a0)              /* dst */
+    ld      t1, 8(a0)              /* staged */
+    ld      t2, 16(a0)             /* len */
+2:  beqz    t2, 4f
+    lbu     t3, 0(t1)
+    sb      t3, 0(t0)
+    addi    t1, t1, 1
+    addi    t0, t0, 1
+    addi    t2, t2, -1
+    j       2b
+4:  addi    a0, a0, 24
+    addi    a1, a1, -1
+    j       1b
+3:  fence.i
+    li      a0, 0                  /* hartid */
+    mv      a1, a3                 /* fdt_pa */
+    jr      a2                     /* entry */
+kexec_tramp_end:
 
 trap_return:
     ld      ra, 0(sp)
@@ -919,8 +1092,13 @@ trap_return:
 
 /* Optional virtio-mmio block device, split queue. */
 virtio_init_optional:
-    li      t0, VIRTIO_FIRST
+    la      t1, machine_id
+    lbu     t1, 0(t1)
+    li      t0, VIRTIO_FIRST       /* qemu-virt window */
     li      t3, VIRTIO_END
+    beqz    t1, 1f
+    li      t0, VIRTIO_FIRST_TEMU  /* TinyEMU window */
+    li      t3, VIRTIO_END_TEMU
 1:  bgeu    t0, t3, 9f
     lw      t1, 0(t0)
     li      t2, 0x74726976
@@ -1083,6 +1261,20 @@ virtio_sector:
 6:  fence   r, r
     lhu     t2, 2(t0)
     beq     t1, t2, 6b
+    /* ISR-ACK: consume-and-ack the device interrupt so the virtio interrupt
+     * line is LOW after every polled I/O, including the last one before a
+     * kexec handoff.  Without it a stale asserted line fires into the next
+     * kernel before it has mapped a virtio_blk handler; linux-6.1's SiFive
+     * PLIC driver never completes an unmapped claim, the served bit wedges
+     * (deliverable = pending & ~served), and the real completion interrupt is
+     * masked forever -> the [vda] boot freeze.  Read InterruptStatus (0x60),
+     * write it back to InterruptACK (0x64).  Harmless on qemu-virt (the driver
+     * polls and never enables interrupts); the ack targets whichever virtio
+     * base machine detection selected. */
+    la      t2, virtio_base
+    ld      t2, 0(t2)
+    lw      t3, 0x60(t2)
+    sw      t3, 0x64(t2)
     li      t0, VIRTIO_STATUS
     lbu     t1, 0(t0)
     bnez    t1, disk_failure
@@ -1189,12 +1381,21 @@ copy_string:
     bnez    t2, 1b
     ret
 
-kernel_putc:
-    li      t0, UART0
-1:  lbu     t1, 5(t0)
+kernel_putc:                       /* a0 = byte; clobbers t0,t1; preserves a0 */
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, 1f
+    li      t0, UART0              /* qemu-virt 16550: poll THR-empty, then write */
+2:  lbu     t1, 5(t0)
     andi    t1, t1, 0x20
-    beqz    t1, 1b
+    beqz    t1, 2b
     sb      a0, 0(t0)
+    ret
+1:  li      t0, HTIF_BASE          /* TinyEMU HTIF: tohost low=char, high=putchar */
+    andi    t1, a0, 0xff
+    sw      t1, 0(t0)
+    li      t1, 0x01010000
+    sw      t1, 4(t0)
     ret
 
 kernel_puthex64:
@@ -1220,17 +1421,105 @@ kernel_puthex64:
     addi    sp, sp, 32
     ret
 
-kernel_puts:
-1:  lbu     t1, 0(t0)
-    beqz    t1, 3f
-    li      t2, UART0
-2:  lbu     t3, 5(t2)
-    andi    t3, t3, 0x20
-    beqz    t3, 2b
-    sb      t1, 0(t2)
-    addi    t0, t0, 1
+kernel_puts:                       /* t0 = asciz ptr; preserves a0 */
+    addi    sp, sp, -32
+    sd      ra, 0(sp)
+    sd      s0, 8(sp)
+    sd      a0, 16(sp)
+    mv      s0, t0
+1:  lbu     a0, 0(s0)
+    beqz    a0, 3f
+    call    kernel_putc
+    addi    s0, s0, 1
     j       1b
-3:  ret
+3:  ld      a0, 16(sp)
+    ld      s0, 8(sp)
+    ld      ra, 0(sp)
+    addi    sp, sp, 32
+    ret
+
+/* --- machine abstraction: qemu-virt vs TinyEMU, selected once at boot ------- */
+
+/* detect_machine: probe whether the PMP CSRs exist.  qemu-virt implements PMP,
+   so `csrw pmpaddr0/pmpcfg0` completes -- and we take that write as the grant
+   giving S/U access to all physical memory.  TinyEMU implements no PMP CSRs, so
+   the write traps illegal and probe_trap records machine_id=1 and skips it.
+   Clobbers t0,t1.  Restores mtvec = machine_trap on return. */
+detect_machine:
+    la      t0, machine_id
+    sb      zero, 0(t0)            /* assume qemu-virt (0) */
+    la      t0, probe_trap
+    csrw    mtvec, t0
+    li      t0, -1
+    csrw    pmpaddr0, t0           /* traps illegal on TinyEMU */
+    li      t0, 0x0f               /* TOR, R/W/X */
+    csrw    pmpcfg0, t0            /* traps illegal on TinyEMU */
+    la      t0, machine_trap
+    csrw    mtvec, t0
+    ret
+
+    .balign 4
+probe_trap:
+    la      t0, machine_id
+    li      t1, 1
+    sb      t1, 0(t0)              /* TinyEMU: no PMP CSRs */
+    csrr    t0, mepc
+    addi    t0, t0, 4
+    csrw    mepc, t0               /* resume past the illegal csrw */
+    mret
+
+/* console_init: qemu-virt needs 8n1 UART setup; TinyEMU HTIF needs none. */
+console_init:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Lci_done
+    li      t0, UART0
+    li      t1, 3
+    sb      t1, 3(t0)              /* 8n1 */
+.Lci_done:
+    ret
+
+/* detect_report: print which machine was selected.  The line only reaches a
+   console via the branch detect_machine chose, so its presence in a given
+   emulator's log is itself proof the probe discriminated correctly. */
+detect_report:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, .Ldr_temu
+    la      t0, detect_qemu_message
+    j       kernel_puts
+.Ldr_temu:
+    la      t0, detect_temu_message
+    j       kernel_puts
+
+/* poweroff(a0 = exit status): halt the machine.
+   qemu-virt SiFive test finisher: a0==0 -> 0x5555 pass; else (a0<<16)|0x3333.
+   TinyEMU HTIF: tohost=1 -> "Power off." exit(0) (no exit-code encoding). */
+poweroff:
+    la      t0, machine_id
+    lbu     t0, 0(t0)
+    bnez    t0, htif_poweroff
+    li      t0, TEST_FINISHER
+    beqz    a0, .Lpo_pass
+    slli    a0, a0, 16
+    li      t1, 0x3333
+    or      a0, a0, t1
+    sw      a0, 0(t0)
+    j       .Lpo_halt
+.Lpo_pass:
+    li      t1, 0x5555
+    sw      t1, 0(t0)
+.Lpo_halt:
+    wfi
+    j       .Lpo_halt
+htif_poweroff:
+    li      t0, HTIF_BASE
+    li      t1, 1
+    sw      t1, 0(t0)
+    sw      zero, 4(t0)
+.Lhtif_halt:
+    wfi
+    j       .Lhtif_halt
 
 /* t0=source, t1=destination, t2=64-bit word count */
 copy_words:
@@ -2205,6 +2494,7 @@ input_name:      .asciz "/input"
 output_name:     .asciz "/output"
 exec_target_name: .asciz "/exec-target"
 dev_hda_name:     .asciz "/dev/hda"
+dev_dtb_name:     .asciz "/dev/dtb"
 command_src:      .asciz "src"
 command_hex0:     .asciz "hex0"
 command_flush:    .asciz "f"
@@ -2216,6 +2506,8 @@ machine_trap_message: .asciz "builder-hex0-riscv64 machine trap: mcause/mepc/mtv
 stage0_success:  .asciz "builder-hex0-riscv64 real stage0 hex0-seed passed\n"
 stage0_selfhost_success:
     .asciz "builder-hex0-riscv64 stage0 hex0-seed self-build passed\n"
+detect_qemu_message: .asciz "builder-hex0-riscv64: detected qemu-virt (PMP present)\n"
+detect_temu_message: .asciz "builder-hex0-riscv64: detected TinyEMU (no PMP)\n"
 
     .balign 8
 builtin_exec_elf:
@@ -2282,3 +2574,9 @@ shell_resume_sp:    .dword 0
 shell_resume_ra:    .dword 0
 shell_command_ptr:  .dword 0
 shell_argument_ptr: .dword 0
+machine_id:         .dword 0       /* 0 = qemu-virt, 1 = TinyEMU (set at boot) */
+/* kexec service state */
+kexec_strip_next:   .dword 0          /* 0 => init to KEXEC_STRIP on first stage */
+kexec_count:        .dword 0
+kexec_entry:        .dword 0
+kexec_fdt:          .dword 0
