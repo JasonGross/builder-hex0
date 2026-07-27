@@ -72,21 +72,36 @@ Stage 1 currently produces a 1,469-byte image with SHA-256
 `93484544839ab46999c956798c9da672ab3c3729aac67ea4bba41c30c0c3f882`.
 The oracle and both emulator transports pass.
 
-The first stage-2 gate establishes 39-bit translation tables, gives EL1 an
-identity-mapped kernel/device address space, maps a separate EL0 code and stack
-region, and enters an AArch64 fixture through `eret`. The lower-EL synchronous
-vector preserves all 31 general registers and implements Linux AArch64
-`write`/`exit` calls through `svc`. Its checked hex0 reconstructs the 4,568-byte
-oracle image exactly; the current SHA-256 is
-`9aaae413c15a805f6e8644d0e3de4ee6e6a52820efb3c2d8514faa374ca33b9e`.
-Run it with:
+Stage 2 establishes 39-bit translation tables, gives EL1 an identity-mapped
+kernel/device address space, maps separate EL0 image and stack regions, and
+enters an AArch64 executable through `eret`. With no block device it retains a
+built-in privilege fixture. A disk with the stage-2 header below instead loads
+and validates an ELF64/AArch64 `ET_EXEC`, copies every `PT_LOAD` segment,
+clears BSS, and initializes the process break. The lower-EL synchronous vector
+preserves all 31 general registers and implements raw Linux AArch64
+`write`/`brk`/`exit`/`exit_group` calls through `svc`.
+
+| Offset | Value |
+| ---: | --- |
+| `0x00` | magic `BXHDRAE2` |
+| `0x08` | first ELF sector |
+| `0x10` | exact ELF byte count |
+
+The checked hex0 reconstructs the 6,325-byte oracle image exactly; the current
+SHA-256 is
+`340a350dc2f766ecd20d1151314586f8c80b8b5d89b478bce2bc66baf1c35aae`.
+Run all three paths with:
 
 ```sh
 make test-arm64-stage2
 ```
 
-Disk-backed ELF loading and the complete syscall/memory-file substrate remain
-the next stage-2 increments.
+The gate runs the built-in fixture and the same disk ELF over legacy and modern
+virtio-mmio. It pre-dirties BSS and heap pages, then proves that the ELF loader
+and `brk` clear them. The `brk` growth crosses a 2 MiB block boundary, so the
+test also covers every initial user mapping needed by the fixture. The
+memory-file substrate and the remaining stage0-posix syscall surface are the
+next stage-2 increments.
 
 ## Design and bug log
 
@@ -110,8 +125,8 @@ the next stage-2 increments.
   dual-transport parser gate exposed and now covers the PFN calculation.
 - Stage 2 uses a 39-bit TTBR0 layout with a supervisor-only 1 GiB identity
   block and explicit low user mappings. This keeps the initial table small
-  while ensuring the EL0 fixture cannot access the identity-mapped kernel or
-  PL011 window.
+  while ensuring EL0 cannot access the identity-mapped kernel, PL011, or
+  virtio windows.
 - The exception frame saves every AArch64 general register before syscall
   dispatch. Later disk and process code can extend the frame without changing
   the EL0 ABI already covered by the privilege gate.
@@ -119,3 +134,14 @@ the next stage-2 increments.
   explicit four-byte advance required by RISC-V `ecall`. The first gate copied
   that behavior, skipped the fixture's zero exit status, and entered the
   negative path after a successful `write`.
+- The disk format records an exact ELF byte count rather than trusting whole
+  sectors. The loader bounds the program-header table and every file and
+  memory range against that count, the 16 MiB staging area, and the mapped
+  user arena. Dynamic linking and PIE remain outside this bootstrap stage.
+- Raw Linux `brk(0)` returns the current break. The first implementation
+  branched directly to trap return and left the query argument (`0`) in `x0`;
+  the disk ELF gate exposed this even though the stored break was correct.
+- User block descriptors include high execute-never permission bits. The
+  initial map loop compared that descriptor value with a physical endpoint
+  and stopped after one block. A separate physical cursor now controls the
+  loop, and the gate grows and reads the heap beyond the first 2 MiB mapping.
