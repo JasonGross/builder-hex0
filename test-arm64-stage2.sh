@@ -30,13 +30,13 @@ run_disk_gate()
 		-device virtio-blk-device,drive=hd0 \
 		-device loader,data=0x5a,addr=0x40601000,data-len=1 \
 		-device loader,data=0x5a,addr=0x40601fff,data-len=1 \
-		-device loader,data=0x5a,addr=0x40602000,data-len=1 \
+		-device loader,data=0x5a,addr=0x40603000,data-len=1 \
 		-device loader,data=0x5a,addr=0x40800000,data-len=1 \
 		-no-reboot "$@" > "$log" 2>&1
 
 	cat "$log"
 	grep -q 'builder-hex0-arm64 stage2 disk ELF64 loaded' "$log"
-	grep -q 'builder-hex0-arm64 disk ELF64 and brk passed' "$log"
+	grep -q 'builder-hex0-arm64 disk ELF64, files, and brk passed' "$log"
 	if grep -Eq 'stage2 (trap failure|disk request failed|invalid ELF64 image)' "$log"; then
 		exit 1
 	fi

@@ -21,4 +21,6 @@ SECTIONS
     .bss : {
         *(.bss*)
     } :data
+    . = ALIGN(4096);
+    image_break = .;
 }

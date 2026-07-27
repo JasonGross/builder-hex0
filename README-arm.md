@@ -79,7 +79,9 @@ built-in privilege fixture. A disk with the stage-2 header below instead loads
 and validates an ELF64/AArch64 `ET_EXEC`, copies every `PT_LOAD` segment,
 clears BSS, and initializes the process break. The lower-EL synchronous vector
 preserves all 31 general registers and implements raw Linux AArch64
-`write`/`brk`/`exit`/`exit_group` calls through `svc`.
+`openat`/`close`/`lseek`/`read`/`write`/`brk`/`exit`/`exit_group` calls through
+`svc`. A fixed-size bootstrap filesystem supplies `/input` and supports file
+creation, truncation, rewinding, and bounded reads and writes.
 
 | Offset | Value |
 | ---: | --- |
@@ -87,9 +89,9 @@ preserves all 31 general registers and implements raw Linux AArch64
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 6,325-byte oracle image exactly; the current
+The checked hex0 reconstructs the 7,382-byte oracle image exactly; the current
 SHA-256 is
-`340a350dc2f766ecd20d1151314586f8c80b8b5d89b478bce2bc66baf1c35aae`.
+`0f16757a7a4fd237b82f3a7270d95a36f74045f098ec7129dc194732ec2534a1`.
 Run all three paths with:
 
 ```sh
@@ -100,8 +102,10 @@ The gate runs the built-in fixture and the same disk ELF over legacy and modern
 virtio-mmio. It pre-dirties BSS and heap pages, then proves that the ELF loader
 and `brk` clear them. The `brk` growth crosses a 2 MiB block boundary, so the
 test also covers every initial user mapping needed by the fixture. The
-memory-file substrate and the remaining stage0-posix syscall surface are the
-next stage-2 increments.
+external process reads the seeded `/input`, creates and truncates `/output`,
+writes it, seeks to the beginning, reads it back, and closes both descriptors.
+Path normalization, unlink/access/chdir operations, process sequencing, and
+the remaining stage0-posix syscall surface are the next stage-2 increments.
 
 ## Design and bug log
 
@@ -138,6 +142,11 @@ next stage-2 increments.
   sectors. The loader bounds the program-header table and every file and
   memory range against that count, the 16 MiB staging area, and the mapped
   user arena. Dynamic linking and PIE remain outside this bootstrap stage.
+- The first memory-file increment uses 16 fixed file records, 32 descriptor
+  records, 128-byte names, and 64 KiB payload slots. Those bounds keep the
+  seed allocator-free while making exhaustion deterministic; later shell work
+  can replace the fixed payload layout without changing the covered syscall
+  ABI.
 - Raw Linux `brk(0)` returns the current break. The first implementation
   branched directly to trap return and left the query argument (`0`) in `x0`;
   the disk ELF gate exposed this even though the stored break was correct.

@@ -15,12 +15,22 @@
     .equ USER_ENTRY_SLOT,    0x41002000
     .equ PROCESS_BRK_SLOT,   0x41002008
     .equ PROCESS_BRK_MIN,    0x41002010
+    .equ FILE_COUNT_SLOT,    0x41002018
     .equ VIRTQ_DESC,         0x41200000
     .equ VIRTQ_AVAIL,        0x41201000
     .equ VIRTQ_USED,         0x41202000
     .equ VIRTIO_HEADER,      0x41203000
     .equ VIRTIO_STATUS,      0x41203010
     .equ SECTOR_BUFFER,      0x41204000
+    .equ FILE_TABLE,         0x41400000
+    .equ FD_TABLE,           0x41401000
+    .equ FILE_NAMES,         0x41402000
+    .equ FILE_DATA,          0x41800000
+    .equ FILE_RECORD_SIZE,   32
+    .equ FD_RECORD_SIZE,     24
+    .equ MAX_FILES,          16
+    .equ MAX_FDS,            32
+    .equ FILE_CAPACITY,      65536
     .equ USER_PHYS,          0x40600000
     .equ USER_VIRT,          0x00600000
     .equ USER_PHYS_OFFSET,   0x40000000
@@ -138,6 +148,7 @@ el1_entry:
     adrp    x9, vector_table
     add     x9, x9, :lo12:vector_table
     msr     vbar_el1, x9
+    bl      init_filesystem
     bl      load_disk_elf_optional
     cbz     x0, 5f
     ldr     x9, =USER_ENTRY_SLOT
@@ -210,6 +221,14 @@ lower_a64_sync:
     cmp     x9, #0x15             /* SVC from AArch64 */
     b.ne    trap_failure
 
+    cmp     x8, #56               /* Linux AArch64 openat */
+    b.eq    syscall_openat
+    cmp     x8, #57               /* Linux AArch64 close */
+    b.eq    syscall_close
+    cmp     x8, #62               /* Linux AArch64 lseek */
+    b.eq    syscall_lseek
+    cmp     x8, #63               /* Linux AArch64 read */
+    b.eq    syscall_read
     cmp     x8, #64               /* Linux AArch64 write */
     b.eq    syscall_write
     cmp     x8, #214              /* Linux AArch64 brk */
@@ -222,6 +241,8 @@ lower_a64_sync:
     b       trap_return
 
 syscall_write:
+    cmp     x0, #3
+    b.hs    syscall_write_file
     cmp     x0, #1
     b.eq    1f
     cmp     x0, #2
@@ -242,6 +263,168 @@ syscall_write:
 
 syscall_bad_fd:
     mov     x0, #-9               /* -EBADF */
+    b       trap_return
+
+syscall_openat:
+    mov     x19, x1               /* pathname */
+    mov     x20, x2               /* flags */
+    mov     x0, x19
+    bl      find_file
+    cbnz    x0, 1f
+    tst     x20, #0x40            /* O_CREAT */
+    b.eq    syscall_no_entry
+    mov     x0, x19
+    bl      create_file
+    cbz     x0, syscall_no_space
+1:  mov     x11, x0               /* file record */
+    tst     x20, #0x200           /* O_TRUNC */
+    b.eq    2f
+    and     x12, x20, #3
+    cbz     x12, 2f
+    str     xzr, [x11, #16]
+2:  ldr     x9, =FD_TABLE
+    add     x9, x9, #(3 * FD_RECORD_SIZE)
+    mov     x10, #3
+3:  ldr     x12, [x9]
+    cbz     x12, 4f
+    add     x9, x9, #FD_RECORD_SIZE
+    add     x10, x10, #1
+    cmp     x10, #MAX_FDS
+    b.lo    3b
+    mov     x0, #-24              /* -EMFILE */
+    b       trap_return
+4:  str     x11, [x9]
+    str     xzr, [x9, #8]
+    str     x20, [x9, #16]
+    mov     x0, x10
+    b       trap_return
+
+syscall_close:
+    cmp     x0, #3
+    b.lo    syscall_bad_fd
+    cmp     x0, #MAX_FDS
+    b.hs    syscall_bad_fd
+    mov     x10, #FD_RECORD_SIZE
+    ldr     x9, =FD_TABLE
+    madd    x9, x0, x10, x9
+    ldr     x10, [x9]
+    cbz     x10, syscall_bad_fd
+    str     xzr, [x9]
+    str     xzr, [x9, #8]
+    str     xzr, [x9, #16]
+    mov     x0, #0
+    b       trap_return
+
+syscall_read:
+    cmp     x0, #3
+    b.lo    syscall_bad_fd
+    cmp     x0, #MAX_FDS
+    b.hs    syscall_bad_fd
+    mov     x10, #FD_RECORD_SIZE
+    ldr     x9, =FD_TABLE
+    madd    x9, x0, x10, x9
+    ldr     x10, [x9]             /* file record */
+    cbz     x10, syscall_bad_fd
+    ldr     x11, [x9, #16]
+    and     x11, x11, #3
+    cmp     x11, #1               /* O_WRONLY */
+    b.eq    syscall_bad_fd
+    ldr     x12, [x9, #8]         /* offset */
+    ldr     x13, [x10, #16]       /* length */
+    cmp     x12, x13
+    b.hs    3f
+    sub     x13, x13, x12
+    cmp     x2, x13
+    csel    x14, x2, x13, lo      /* transfer count */
+    ldr     x15, [x10, #8]
+    add     x15, x15, x12         /* source */
+    mov     x16, x1               /* destination */
+    mov     x17, x14
+1:  cbz     x17, 2f
+    ldrb    w10, [x15], #1
+    strb    w10, [x16], #1
+    sub     x17, x17, #1
+    b       1b
+2:  add     x12, x12, x14
+    str     x12, [x9, #8]
+    mov     x0, x14
+    b       trap_return
+3:  mov     x0, #0
+    b       trap_return
+
+syscall_write_file:
+    cmp     x0, #MAX_FDS
+    b.hs    syscall_bad_fd
+    mov     x10, #FD_RECORD_SIZE
+    ldr     x9, =FD_TABLE
+    madd    x9, x0, x10, x9
+    ldr     x10, [x9]             /* file record */
+    cbz     x10, syscall_bad_fd
+    ldr     x11, [x9, #16]
+    and     x11, x11, #3
+    cbz     x11, syscall_bad_fd   /* O_RDONLY */
+    ldr     x12, [x9, #8]         /* offset */
+    adds    x13, x12, x2
+    b.cs    syscall_no_space
+    ldr     x14, [x10, #24]       /* capacity */
+    cmp     x13, x14
+    b.hi    syscall_no_space
+    ldr     x14, [x10, #8]
+    add     x14, x14, x12         /* destination */
+    mov     x15, x1               /* source */
+    mov     x16, x2
+1:  cbz     x16, 2f
+    ldrb    w17, [x15], #1
+    strb    w17, [x14], #1
+    sub     x16, x16, #1
+    b       1b
+2:  str     x13, [x9, #8]
+    ldr     x14, [x10, #16]
+    cmp     x13, x14
+    csel    x14, x13, x14, hi
+    str     x14, [x10, #16]
+    mov     x0, x2
+    b       trap_return
+
+syscall_lseek:
+    cmp     x0, #3
+    b.lo    syscall_bad_fd
+    cmp     x0, #MAX_FDS
+    b.hs    syscall_bad_fd
+    mov     x10, #FD_RECORD_SIZE
+    ldr     x9, =FD_TABLE
+    madd    x9, x0, x10, x9
+    ldr     x10, [x9]             /* file record */
+    cbz     x10, syscall_bad_fd
+    cbz     x2, 1f                /* SEEK_SET */
+    cmp     x2, #1
+    b.eq    2f                    /* SEEK_CUR */
+    cmp     x2, #2
+    b.ne    syscall_invalid
+    ldr     x11, [x10, #16]       /* SEEK_END */
+    b       3f
+1:  mov     x11, #0
+    b       3f
+2:  ldr     x11, [x9, #8]
+3:  adds    x11, x11, x1
+    b.mi    syscall_invalid
+    ldr     x12, [x10, #24]
+    cmp     x11, x12
+    b.hi    syscall_invalid
+    str     x11, [x9, #8]
+    mov     x0, x11
+    b       trap_return
+
+syscall_no_entry:
+    mov     x0, #-2               /* -ENOENT */
+    b       trap_return
+
+syscall_no_space:
+    mov     x0, #-28              /* -ENOSPC */
+    b       trap_return
+
+syscall_invalid:
+    mov     x0, #-22              /* -EINVAL */
     b       trap_return
 
 syscall_brk:
@@ -298,6 +481,107 @@ trap_failure:
     add     x0, x0, :lo12:trap_failure_message
     bl      uart_puts
     b       poweroff
+
+/* Fixed-size memory-file and descriptor tables for the stage0-posix surface. */
+init_filesystem:
+    ldr     x9, =FILE_TABLE
+    ldr     x10, =FILE_NAMES
+1:  str     xzr, [x9], #8
+    cmp     x9, x10
+    b.lo    1b
+
+    ldr     x9, =FILE_TABLE
+    ldr     x10, =FILE_NAMES
+    str     x10, [x9]             /* name */
+    ldr     x11, =FILE_DATA
+    str     x11, [x9, #8]         /* data */
+    adrp    x12, input_data
+    add     x12, x12, :lo12:input_data
+    adrp    x13, input_data_end
+    add     x13, x13, :lo12:input_data_end
+    sub     x14, x13, x12
+    str     x14, [x9, #16]        /* length */
+    ldr     x14, =FILE_CAPACITY
+    str     x14, [x9, #24]        /* capacity */
+
+    adrp    x12, input_name
+    add     x12, x12, :lo12:input_name
+    mov     x13, x10
+2:  ldrb    w14, [x12], #1
+    strb    w14, [x13], #1
+    cbnz    w14, 2b
+
+    adrp    x12, input_data
+    add     x12, x12, :lo12:input_data
+    adrp    x13, input_data_end
+    add     x13, x13, :lo12:input_data_end
+    ldr     x14, =FILE_DATA
+3:  cmp     x12, x13
+    b.hs    4f
+    ldrb    w15, [x12], #1
+    strb    w15, [x14], #1
+    b       3b
+4:  ldr     x9, =FILE_COUNT_SLOT
+    mov     x10, #1
+    str     x10, [x9]
+    ret
+
+/* x0=path, returns the newest matching file record or zero. */
+find_file:
+    mov     x17, x0
+    ldr     x9, =FILE_COUNT_SLOT
+    ldr     x10, [x9]
+    ldr     x9, =FILE_TABLE
+1:  cbz     x10, 4f
+    ldr     x11, [x9]
+    mov     x12, x17
+2:  ldrb    w13, [x11], #1
+    ldrb    w14, [x12], #1
+    cmp     w13, w14
+    b.ne    3f
+    cbnz    w13, 2b
+    mov     x0, x9
+    ret
+3:  add     x9, x9, #FILE_RECORD_SIZE
+    sub     x10, x10, #1
+    b       1b
+4:  mov     x0, #0
+    ret
+
+/* x0=path, returns a new empty file record or zero. */
+create_file:
+    mov     x17, x0
+    ldr     x9, =FILE_COUNT_SLOT
+    ldr     x10, [x9]
+    cmp     x10, #MAX_FILES
+    b.hs    4f
+    ldr     x11, =FILE_TABLE
+    add     x11, x11, x10, lsl #5
+    ldr     x12, =FILE_NAMES
+    add     x12, x12, x10, lsl #7
+    mov     x13, x12
+    mov     x14, #0
+1:  ldrb    w15, [x17], #1
+    cbz     w15, 2f
+    cmp     x14, #127
+    b.hs    4f
+    strb    w15, [x13], #1
+    add     x14, x14, #1
+    b       1b
+2:  strb    wzr, [x13]
+    str     x12, [x11]
+    ldr     x12, =FILE_DATA
+    add     x12, x12, x10, lsl #16
+    str     x12, [x11, #8]
+    str     xzr, [x11, #16]
+    ldr     x12, =FILE_CAPACITY
+    str     x12, [x11, #24]
+    add     x10, x10, #1
+    str     x10, [x9]
+    mov     x0, x11
+    ret
+4:  mov     x0, #0
+    ret
 
 /*
  * A valid sector-zero header selects the disk-backed ELF gate:
@@ -711,3 +995,8 @@ disk_elf_message:
     .asciz  "builder-hex0-arm64 stage2 disk ELF64 loaded\n"
 disk_brk_message:
     .asciz  "builder-hex0-arm64 stage2 initial brk: 0x"
+input_name:
+    .asciz  "/input"
+input_data:
+    .ascii  "builder memory file input\n"
+input_data_end:
