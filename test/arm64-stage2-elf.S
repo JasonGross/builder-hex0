@@ -50,7 +50,7 @@ _start:
 
     /* Read the seeded file through the Linux AArch64 descriptor ABI. */
     mov     x0, #-100             /* AT_FDCWD */
-    adr     x1, input_path
+    adr     x1, normalized_input_path
     mov     x2, #0               /* O_RDONLY */
     mov     x3, #0
     mov     x8, #56              /* openat */
@@ -119,6 +119,73 @@ _start:
     svc     #0
     cbnz    x0, failure
 
+    /*
+     * Canonicalize a virtual working directory, then create, inspect, chmod,
+     * and unlink a relative file. The final lookup also proves deleted file
+     * records are skipped safely.
+     */
+    adr     x0, chdir_path
+    mov     x8, #49              /* chdir */
+    svc     #0
+    cbnz    x0, failure
+    mov     x0, #-100
+    adr     x1, create_path
+    mov     x2, #0x242           /* O_RDWR | O_CREAT | O_TRUNC */
+    mov     x3, #0
+    mov     x8, #56
+    svc     #0
+    tbnz    x0, #63, failure
+    mov     x22, x0
+    mov     x0, x22
+    mov     x8, #57
+    svc     #0
+    cbnz    x0, failure
+    mov     x0, #-100
+    adr     x1, relative_path
+    mov     x2, #0
+    mov     x3, #0
+    mov     x8, #48              /* faccessat */
+    svc     #0
+    cbnz    x0, failure
+    mov     x0, #-100
+    adr     x1, relative_path
+    mov     x2, #0x180           /* 0600 */
+    mov     x3, #0
+    mov     x8, #53              /* fchmodat */
+    svc     #0
+    cbnz    x0, failure
+    mov     x0, #-100
+    adr     x1, relative_path
+    mov     x2, #0
+    mov     x8, #35              /* unlinkat */
+    svc     #0
+    cbnz    x0, failure
+    mov     x0, #-100
+    adr     x1, relative_path
+    mov     x2, #0
+    mov     x3, #0
+    mov     x8, #48
+    svc     #0
+    mov     x9, #-2              /* -ENOENT */
+    cmp     x0, x9
+    b.ne    failure
+    mov     x0, #-100
+    adr     x1, long_path
+    mov     x2, #0
+    mov     x3, #0
+    mov     x8, #48
+    svc     #0
+    mov     x9, #-36             /* -ENAMETOOLONG */
+    cmp     x0, x9
+    b.ne    failure
+
+    mov     x0, #1
+    adr     x1, path_message
+    adr     x2, path_message_end
+    sub     x2, x2, x1
+    mov     x8, #64
+    svc     #0
+
     mov     x0, #1
     adr     x1, success_message
     adr     x2, success_message_end
@@ -157,16 +224,31 @@ bss_message_end:
 brk_query_message:
     .ascii  "builder-hex0-arm64 disk ELF64 brk query passed\n"
 brk_query_message_end:
-input_path:
-    .asciz  "/input"
+normalized_input_path:
+    .asciz  "///tmp/.././input"
 output_path:
     .asciz  "/output"
+chdir_path:
+    .asciz  "/tmp/a/../work"
+create_path:
+    .asciz  "../work/./file"
+relative_path:
+    .asciz  "./file"
+long_path:
+    .ascii  "/"
+    .rept   127
+    .ascii  "a"
+    .endr
+    .byte   0
 input_expected:
     .ascii  "builder memory file input\n"
 input_expected_end:
 output_data:
     .ascii  "builder memory file roundtrip\n"
 output_data_end:
+path_message:
+    .ascii  "builder-hex0-arm64 path syscalls passed\n"
+path_message_end:
 
     .section .bss
     .balign 4096

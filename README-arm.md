@@ -79,9 +79,11 @@ built-in privilege fixture. A disk with the stage-2 header below instead loads
 and validates an ELF64/AArch64 `ET_EXEC`, copies every `PT_LOAD` segment,
 clears BSS, and initializes the process break. The lower-EL synchronous vector
 preserves all 31 general registers and implements raw Linux AArch64
-`openat`/`close`/`lseek`/`read`/`write`/`brk`/`exit`/`exit_group` calls through
-`svc`. A fixed-size bootstrap filesystem supplies `/input` and supports file
-creation, truncation, rewinding, and bounded reads and writes.
+`unlinkat`/`faccessat`/`chdir`/`fchmodat`/`openat`/`close`/`lseek`/`read`/
+`write`/`brk`/`exit`/`exit_group` calls through `svc`. A fixed-size bootstrap
+filesystem supplies `/input`, canonicalizes absolute and cwd-relative paths,
+and supports file creation, truncation, lookup, unlink, rewinding, and bounded
+reads and writes.
 
 | Offset | Value |
 | ---: | --- |
@@ -89,9 +91,9 @@ creation, truncation, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 7,382-byte oracle image exactly; the current
+The checked hex0 reconstructs the 7,862-byte oracle image exactly; the current
 SHA-256 is
-`0f16757a7a4fd237b82f3a7270d95a36f74045f098ec7129dc194732ec2534a1`.
+`654b96a7dfcd1b557c142199176936ae03595400b66dad7a96ca9966d6a28715`.
 Run all three paths with:
 
 ```sh
@@ -104,8 +106,11 @@ and `brk` clear them. The `brk` growth crosses a 2 MiB block boundary, so the
 test also covers every initial user mapping needed by the fixture. The
 external process reads the seeded `/input`, creates and truncates `/output`,
 writes it, seeks to the beginning, reads it back, and closes both descriptors.
-Path normalization, unlink/access/chdir operations, process sequencing, and
-the remaining stage0-posix syscall surface are the next stage-2 increments.
+It also canonicalizes repeated separators and dot components, changes its
+virtual cwd, creates and finds a relative path, checks access, applies the
+bootstrap chmod no-op, unlinks it, and verifies that a later lookup returns
+`ENOENT`. Process sequencing and the remaining stage0-posix syscall surface
+are the next stage-2 increments.
 
 ## Design and bug log
 
@@ -154,3 +159,11 @@ the remaining stage0-posix syscall surface are the next stage-2 increments.
   initial map loop compared that descriptor value with a physical endpoint
   and stopped after one block. A separate physical cursor now controls the
   loop, and the gate grows and reads the heap beyond the first 2 MiB mapping.
+- Files must be stored under one canonical absolute name. Normalization now
+  collapses repeated separators, removes `.` components, resolves `..`
+  without escaping root, and rejects names that exceed the fixed 128-byte
+  representation before lookup or creation.
+- Unlink leaves a tombstone in the append-only bootstrap file table so open
+  descriptors remain valid. The first lookup loop dereferenced that zero name
+  pointer; it now skips tombstones, and the fixture performs a lookup after
+  unlink to cover the failure mode.

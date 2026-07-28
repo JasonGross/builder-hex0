@@ -36,6 +36,7 @@ run_disk_gate()
 
 	cat "$log"
 	grep -q 'builder-hex0-arm64 stage2 disk ELF64 loaded' "$log"
+	grep -q 'builder-hex0-arm64 path syscalls passed' "$log"
 	grep -q 'builder-hex0-arm64 disk ELF64, files, and brk passed' "$log"
 	if grep -Eq 'stage2 (trap failure|disk request failed|invalid ELF64 image)' "$log"; then
 		exit 1
@@ -77,4 +78,4 @@ run_disk_gate BUILD/builder-hex0-arm64-stage2-legacy.log
 run_disk_gate BUILD/builder-hex0-arm64-stage2-modern.log \
 	-global virtio-mmio.force-legacy=false
 
-printf '%s\n' 'arm64 stage2 privilege, ELF64, and brk gates passed'
+printf '%s\n' 'arm64 stage2 privilege, ELF64, path, and brk gates passed'

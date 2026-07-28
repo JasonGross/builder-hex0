@@ -25,6 +25,8 @@
     .equ FILE_TABLE,         0x41400000
     .equ FD_TABLE,           0x41401000
     .equ FILE_NAMES,         0x41402000
+    .equ CWD_BUFFER,         0x41403000
+    .equ PATH_BUFFER,        0x41404000
     .equ FILE_DATA,          0x41800000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
@@ -225,6 +227,14 @@ lower_a64_sync:
     b.eq    syscall_openat
     cmp     x8, #57               /* Linux AArch64 close */
     b.eq    syscall_close
+    cmp     x8, #35               /* Linux AArch64 unlinkat */
+    b.eq    syscall_unlinkat
+    cmp     x8, #48               /* Linux AArch64 faccessat */
+    b.eq    syscall_faccessat
+    cmp     x8, #49               /* Linux AArch64 chdir */
+    b.eq    syscall_chdir
+    cmp     x8, #53               /* Linux AArch64 fchmodat */
+    b.eq    syscall_fchmodat
     cmp     x8, #62               /* Linux AArch64 lseek */
     b.eq    syscall_lseek
     cmp     x8, #63               /* Linux AArch64 read */
@@ -266,8 +276,12 @@ syscall_bad_fd:
     b       trap_return
 
 syscall_openat:
-    mov     x19, x1               /* pathname */
     mov     x20, x2               /* flags */
+    mov     x0, x1
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, syscall_name_too_long
+    mov     x19, x0               /* canonical pathname */
     mov     x0, x19
     bl      find_file
     cbnz    x0, 1f
@@ -312,6 +326,37 @@ syscall_close:
     str     xzr, [x9]
     str     xzr, [x9, #8]
     str     xzr, [x9, #16]
+    mov     x0, #0
+    b       trap_return
+
+syscall_unlinkat:
+    mov     x0, x1
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, syscall_name_too_long
+    bl      find_file
+    cbz     x0, syscall_no_entry
+    str     xzr, [x0]
+    mov     x0, #0
+    b       trap_return
+
+syscall_faccessat:
+syscall_fchmodat:
+    mov     x0, x1
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, syscall_name_too_long
+    bl      find_file
+    cbz     x0, syscall_no_entry
+    mov     x0, #0
+    b       trap_return
+
+syscall_chdir:
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, syscall_name_too_long
+    ldr     x1, =CWD_BUFFER
+    bl      copy_string
     mov     x0, #0
     b       trap_return
 
@@ -427,6 +472,10 @@ syscall_invalid:
     mov     x0, #-22              /* -EINVAL */
     b       trap_return
 
+syscall_name_too_long:
+    mov     x0, #-36              /* -ENAMETOOLONG */
+    b       trap_return
+
 syscall_brk:
     ldr     x9, =PROCESS_BRK_SLOT
     ldr     x10, [x9]             /* old break */
@@ -524,6 +573,95 @@ init_filesystem:
 4:  ldr     x9, =FILE_COUNT_SLOT
     mov     x10, #1
     str     x10, [x9]
+    ldr     x9, =CWD_BUFFER
+    mov     w10, #'/'
+    strb    w10, [x9]
+    strb    wzr, [x9, #1]
+    ret
+
+/* x0=source and x1=destination NUL-terminated strings. */
+copy_string:
+1:  ldrb    w9, [x0], #1
+    strb    w9, [x1], #1
+    cbnz    w9, 1b
+    ret
+
+/*
+ * x0=input path and x1=destination. Return a canonical absolute path, or
+ * zero when the fixed 128-byte file-name representation would overflow.
+ */
+normalize_path:
+    mov     x9, x0                /* input cursor */
+    mov     x10, x1               /* output cursor */
+    mov     x16, x1               /* output base */
+    ldrb    w11, [x9]
+    mov     w12, #'/'
+    cmp     w11, w12
+    b.eq    2f
+    ldr     x13, =CWD_BUFFER
+1:  ldrb    w11, [x13], #1
+    cbz     w11, 3f
+    strb    w11, [x10], #1
+    b       1b
+2:  strb    w12, [x10], #1
+4:  add     x9, x9, #1
+    ldrb    w11, [x9]
+    cmp     w11, w12
+    b.eq    4b
+3:
+    /* Skip separators, then classify "." and ".." components. */
+5:  ldrb    w11, [x9]
+    cbz     w11, 12f
+    cmp     w11, w12
+    b.eq    11f
+    mov     w13, #'.'
+    cmp     w11, w13
+    b.ne    8f
+    ldrb    w11, [x9, #1]
+    cbz     w11, 6f
+    cmp     w11, w12
+    b.eq    6f
+    cmp     w11, w13
+    b.ne    8f
+    ldrb    w11, [x9, #2]
+    cbz     w11, 7f
+    cmp     w11, w12
+    b.ne    8f
+7:  add     x9, x9, #2           /* parent component */
+9:  add     x13, x16, #1
+    cmp     x10, x13
+    b.ls    5b
+    sub     x10, x10, #1
+    ldrb    w11, [x10]
+    cmp     w11, w12
+    b.ne    9b
+    b       5b
+6:  add     x9, x9, #1           /* current component */
+    b       5b
+
+8:  add     x13, x16, #1
+    cmp     x10, x13
+    b.ls    10f
+    add     x14, x16, #127
+    cmp     x10, x14
+    b.hs    13f
+    strb    w12, [x10], #1
+10: ldrb    w11, [x9]
+    cbz     w11, 5b
+    cmp     w11, w12
+    b.eq    5b
+    add     x14, x16, #127
+    cmp     x10, x14
+    b.hs    13f
+    strb    w11, [x10], #1
+    add     x9, x9, #1
+    b       10b
+11: add     x9, x9, #1
+    b       5b
+12: strb    wzr, [x10]
+    mov     x0, x16
+    ret
+13: mov     x0, #0
     ret
 
 /* x0=path, returns the newest matching file record or zero. */
@@ -534,6 +672,7 @@ find_file:
     ldr     x9, =FILE_TABLE
 1:  cbz     x10, 4f
     ldr     x11, [x9]
+    cbz     x11, 3f
     mov     x12, x17
 2:  ldrb    w13, [x11], #1
     ldrb    w14, [x12], #1
