@@ -38,6 +38,8 @@
     .equ SHELL_STRING_DEST,  0x402020b8
     .equ SHELL_ARGV_DEST,    0x402020c0
     .equ SHELL_ARGC_SLOT,    0x402020c8
+    .equ PARENT_SPSR_SLOT,   0x402020d0
+    .equ PARENT_ABI_SLOT,    0x402020d8
     .equ VIRTQ_DESC,         0x40400000
     .equ VIRTQ_AVAIL,        0x40401000
     .equ VIRTQ_USED,         0x40402000
@@ -745,6 +747,13 @@ syscall_clone:
     mrs     x9, sp_el0
     ldr     x10, =PARENT_SP_SLOT
     str     x9, [x10]
+    mrs     x9, spsr_el1
+    ldr     x10, =PARENT_SPSR_SLOT
+    str     x9, [x10]
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    ldr     x10, =PARENT_ABI_SLOT
+    str     x9, [x10]
     ldr     x9, =PROCESS_BRK_SLOT
     ldr     x9, [x9]
     ldr     x10, =PARENT_BRK_SLOT
@@ -757,8 +766,12 @@ syscall_clone:
     /* Snapshot used process memory, the full user stack, fds, and cwd. */
     ldr     x9, =PROCESS_BRK_SLOT
     ldr     x2, [x9]
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, 1f
     ldr     x9, =USER_VIRT
     sub     x2, x2, x9
+1:
     add     x2, x2, #7
     lsr     x2, x2, #3
     ldr     x9, =PARENT_PROCESS_WORDS
@@ -802,11 +815,17 @@ syscall_execve:
     b.ne    syscall_exec_format
 
     /* Copy argv out before PT_LOAD overwrites the old process image. */
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x27, [x9]
     ldr     x9, =EXEC_ARGV
     ldr     x10, =EXEC_STRINGS
     mov     x22, #0               /* argc */
 1:  cbz     x19, 4f
+    cbnz    x27, 3f
     ldr     x11, [x19], #8
+    b       5f
+3:  ldr     w11, [x19], #4
+5:
     cbz     x11, 4f
     cmp     x22, #31
     b.hs    syscall_arg_too_big
@@ -824,8 +843,11 @@ syscall_execve:
     mov     x1, x21
     bl      load_elf
     mov     x23, x0               /* new entry */
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, exec_build_a32_stack
 
-    /* Construct argc/argv/envp in the top page of the user stack. */
+    /* Construct the Linux AArch64 argc/argv/envp stack. */
     ldr     x24, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
     str     x22, [x24]
     add     x25, x24, #8          /* user argv slots */
@@ -848,13 +870,47 @@ syscall_execve:
     ldr     x9, =(USER_STACK_TOP - 4096)
     msr     sp_el0, x9
     msr     elr_el1, x23
+    mov     x9, #0x3c0
+    msr     spsr_el1, x9
+    b       exec_clear_frame
+
+exec_build_a32_stack:
+    ldr     x24, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     w22, [x24]
+    add     x25, x24, #4          /* user argv slots */
+    add     x26, x24, #0x400      /* user strings */
+    ldr     x9, =EXEC_ARGV
+    mov     x10, #0
+1:  cmp     x10, x22
+    b.hs    2f
+    ldr     x11, =USER_PHYS_OFFSET
+    sub     x11, x26, x11
+    str     w11, [x25], #4
+    ldr     x11, [x9], #8
+3:  ldrb    w12, [x11], #1
+    strb    w12, [x26], #1
+    cbnz    w12, 3b
+    add     x10, x10, #1
+    b       1b
+2:  str     wzr, [x25], #4        /* argv[argc] */
+    str     wzr, [x25]            /* envp[0] */
+    msr     elr_el1, x23
+    mov     x9, #0x1d0
+    msr     spsr_el1, x9
 
     /* Successful exec starts with a clean register frame. */
+exec_clear_frame:
     mov     x9, sp
     add     x10, sp, #256
 8:  str     xzr, [x9], #8
     cmp     x9, x10
     b.lo    8b
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    cbz     x9, 9f
+    ldr     x9, =(USER_STACK_TOP - 4096)
+    str     x9, [sp, #104]        /* AArch32 R13_usr in the saved X13 */
+9:
     mov     x0, #0
     b       trap_return
 
@@ -938,6 +994,18 @@ restore_parent:
     ldr     x9, =PARENT_SP_SLOT
     ldr     x9, [x9]
     msr     sp_el0, x9
+    ldr     x9, =PARENT_SPSR_SLOT
+    ldr     x9, [x9]
+    msr     spsr_el1, x9
+    ldr     x9, =PARENT_ABI_SLOT
+    ldr     x9, [x9]
+    ldr     x10, =PROCESS_ABI_SLOT
+    str     x9, [x10]
+    cbnz    x9, 1f
+    bl      map_user_a64
+    b       2f
+1:  bl      map_user_a32
+2:
     ldr     x9, =CHILD_PROCESS_SLOT
     str     xzr, [x9]
     ldr     x0, =PARENT_FRAME

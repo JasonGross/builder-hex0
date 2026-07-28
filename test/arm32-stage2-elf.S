@@ -106,6 +106,37 @@ _start:
     cmp     r0, r9
     bne     failure
 
+    /*
+     * Fork in AArch32, exec the embedded AArch64 fixture, then restore this
+     * ARM parent and its low-address mappings before wait4 returns.
+     */
+    mov     r7, #2               /* fork */
+    svc     #0
+    cmp     r0, #0
+    beq     clone_child
+    cmp     r0, #1
+    bne     failure
+    mov     r0, #1
+    ldr     r1, =child_status
+    mov     r2, #0
+    mov     r3, #0
+    mov     r7, #114             /* wait4 */
+    svc     #0
+    cmp     r0, #1
+    bne     failure
+    ldr     r9, =child_status
+    ldr     r10, [r9]
+    ldr     r9, =0x700
+    cmp     r10, r9
+    bne     failure
+
+    mov     r0, #1
+    ldr     r1, =process_message
+    ldr     r2, =process_message_end
+    sub     r2, r2, r1
+    mov     r7, #4
+    svc     #0
+
     mov     r0, #1
     ldr     r1, =success_message
     ldr     r2, =success_message_end
@@ -115,6 +146,14 @@ _start:
     mov     r0, #0
     mov     r7, #1               /* exit */
     svc     #0
+
+clone_child:
+    ldr     r0, =exec_path
+    ldr     r1, =child_argv
+    mov     r2, #0
+    mov     r7, #11              /* execve */
+    svc     #0
+    b       failure
 
 /* r0/r1 buffers, r2 bytes; returns zero when equal. */
 compare_bytes:
@@ -146,12 +185,24 @@ input_path:
     .asciz  "/input"
 output_path:
     .asciz  "/arm32-output"
+exec_path:
+    .asciz  "/exec-target"
+child_argument:
+    .asciz  "child"
+    .balign 4
+child_argv:
+    .word   exec_path
+    .word   child_argument
+    .word   0
 input_expected:
     .ascii  "builder memory file input\n"
 input_expected_end:
 output_data:
     .ascii  "AArch32 memory file output\n"
 output_data_end:
+process_message:
+    .ascii  "builder-hex0-arm64 cross-ABI process sequencing passed\n"
+process_message_end:
 
     .section .data
     .byte   0
@@ -162,4 +213,6 @@ bss_probe:
     .skip   4096
 file_buffer:
     .skip   64
+child_status:
+    .skip   4
 bss_probe_end:

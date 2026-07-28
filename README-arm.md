@@ -95,9 +95,9 @@ unlink, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 12,784-byte oracle image exactly; the current
+The checked hex0 reconstructs the 13,032-byte oracle image exactly; the current
 SHA-256 is
-`3ef9f600f05fb5d7f0ba656b8fc3ec33a3f758b294450cf8ed489606cc2d43d8`.
+`2db5734815c8d220c849e531235c2d190c1296324acd20f428443813b506ad44`.
 Run the covered paths with:
 
 ```sh
@@ -119,8 +119,11 @@ virtual cwd, creates and finds a relative path, checks access, applies the
 bootstrap chmod no-op, unlinks it, and verifies that a later lookup returns
 `ENOENT`. Finally, it rejects a non-ELF exec, snapshots a parent with `clone`,
 replaces the child through `execve`, restores the parent on child exit, and
-checks the child's argv-dependent status through `wait4`. Canonical stage0
-inputs and any syscall gaps they expose are the next increments.
+checks the child's argv-dependent status through `wait4`. The AArch32 gate
+also forks an ARM parent, execs the embedded AArch64 child, checks status
+`0x700`, and proves that the parent's 32-bit registers, stack, process image,
+and low virtual mappings are restored. Canonical stage0 inputs and any syscall
+gaps they expose are the next increments.
 
 The internal shell uses a separate sector-zero contract:
 
@@ -270,3 +273,9 @@ checked artifact, remains an end-to-end provenance improvement.
   to `0x00600000..0x02600000` for AArch64 or
   `0x00000000..0x02000000` for AArch32 and invalidates stale translations
   whenever an ELF changes the execution state.
+- A child can change execution state during `execve`, so restoring only its
+  parent's memory and AArch64 trap frame is insufficient. `clone` now also
+  saves the parent's ABI and `SPSR_EL1`, computes snapshot length from the
+  ABI-specific virtual base, and `exit` reinstalls the matching page map and
+  exception-return state. `execve` reads the old argv using 32- or 64-bit
+  pointers and independently constructs the new ELF's ILP32 or LP64 stack.
