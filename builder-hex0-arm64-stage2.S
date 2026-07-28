@@ -10,43 +10,43 @@
     .equ UART0,              0x09000000
     .equ VIRTIO_FIRST,       0x0a000000
     .equ VIRTIO_END,         0x0a004000
-    .equ ROOT_PAGE_TABLE,    0x41000000
-    .equ LOW_PAGE_TABLE,     0x41001000
-    .equ USER_ENTRY_SLOT,    0x41002000
-    .equ PROCESS_BRK_SLOT,   0x41002008
-    .equ PROCESS_BRK_MIN,    0x41002010
-    .equ FILE_COUNT_SLOT,    0x41002018
-    .equ CHILD_PROCESS_SLOT, 0x41002020
-    .equ CHILD_EXIT_STATUS,  0x41002028
-    .equ PARENT_ELR_SLOT,    0x41002030
-    .equ PARENT_SP_SLOT,     0x41002038
-    .equ PARENT_BRK_SLOT,    0x41002040
-    .equ PARENT_BRK_MIN_SLOT, 0x41002048
-    .equ PARENT_PROCESS_WORDS, 0x41002050
-    .equ NEXT_FILE_DATA_SLOT, 0x41002058
-    .equ SHELL_LBA_SLOT,     0x41002060
-    .equ SHELL_REMAINING_SLOT, 0x41002068
-    .equ SHELL_SECTOR_POS,   0x41002070
-    .equ SHELL_FLUSH_PENDING, 0x41002078
-    .equ SHELL_PROCESS_ACTIVE, 0x41002080
-    .equ SHELL_RESUME_SP,    0x41002088
-    .equ SHELL_RESUME_X30,   0x41002090
-    .equ SHELL_COMMAND_PTR,  0x41002098
-    .equ SHELL_ARGUMENT_PTR, 0x410020a0
-    .equ VIRTQ_DESC,         0x41200000
-    .equ VIRTQ_AVAIL,        0x41201000
-    .equ VIRTQ_USED,         0x41202000
-    .equ VIRTIO_HEADER,      0x41203000
-    .equ VIRTIO_STATUS,      0x41203010
-    .equ SECTOR_BUFFER,      0x41204000
-    .equ FILE_TABLE,         0x45d00000
-    .equ FD_TABLE,           0x45d02000
-    .equ FILE_NAMES,         0x45d03000
-    .equ CWD_BUFFER,         0x45d0b000
-    .equ PATH_BUFFER,        0x45d0c000
-    .equ SHELL_LINE_BUFFER,  0x45d0d000
-    .equ FILE_DATA,          0x42000000
-    .equ FILE_DATA_TOP,      0x43800000
+    .equ ROOT_PAGE_TABLE,    0x40200000
+    .equ LOW_PAGE_TABLE,     0x40201000
+    .equ USER_ENTRY_SLOT,    0x40202000
+    .equ PROCESS_BRK_SLOT,   0x40202008
+    .equ PROCESS_BRK_MIN,    0x40202010
+    .equ FILE_COUNT_SLOT,    0x40202018
+    .equ CHILD_PROCESS_SLOT, 0x40202020
+    .equ CHILD_EXIT_STATUS,  0x40202028
+    .equ PARENT_ELR_SLOT,    0x40202030
+    .equ PARENT_SP_SLOT,     0x40202038
+    .equ PARENT_BRK_SLOT,    0x40202040
+    .equ PARENT_BRK_MIN_SLOT, 0x40202048
+    .equ PARENT_PROCESS_WORDS, 0x40202050
+    .equ NEXT_FILE_DATA_SLOT, 0x40202058
+    .equ SHELL_LBA_SLOT,     0x40202060
+    .equ SHELL_REMAINING_SLOT, 0x40202068
+    .equ SHELL_SECTOR_POS,   0x40202070
+    .equ SHELL_FLUSH_PENDING, 0x40202078
+    .equ SHELL_PROCESS_ACTIVE, 0x40202080
+    .equ SHELL_RESUME_SP,    0x40202088
+    .equ SHELL_RESUME_X30,   0x40202090
+    .equ SHELL_COMMAND_PTR,  0x40202098
+    .equ SHELL_ARGUMENT_PTR, 0x402020a0
+    .equ VIRTQ_DESC,         0x40400000
+    .equ VIRTQ_AVAIL,        0x40401000
+    .equ VIRTQ_USED,         0x40402000
+    .equ VIRTIO_HEADER,      0x40403000
+    .equ VIRTIO_STATUS,      0x40403010
+    .equ SECTOR_BUFFER,      0x40404000
+    .equ FILE_TABLE,         0x46f00000
+    .equ FD_TABLE,           0x46f02000
+    .equ FILE_NAMES,         0x46f03000
+    .equ CWD_BUFFER,         0x46f0b000
+    .equ PATH_BUFFER,        0x46f0c000
+    .equ SHELL_LINE_BUFFER,  0x46f0d000
+    .equ FILE_DATA,          0x42600000
+    .equ FILE_DATA_TOP,      0x43e00000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
     .equ MAX_FILES,          256
@@ -54,20 +54,20 @@
     .equ USER_PHYS,          0x40600000
     .equ USER_VIRT,          0x00600000
     .equ USER_PHYS_OFFSET,   0x40000000
-    .equ USER_HEAP_TOP,      0x02000000
-    .equ USER_STACK_PHYS,    0x47e00000
+    .equ USER_HEAP_TOP,      0x02600000
+    .equ USER_STACK_PHYS,    0x47800000
     .equ USER_STACK_TOP,     0x08000000
-    .equ USER_STACK_SIZE,    0x00200000
-    .equ KERNEL_STACK_TOP,   0x47dff000
-    .equ ELF_SOURCE,         0x43800000
-    .equ ELF_SOURCE_LIMIT,   0x44000000
-    .equ PARENT_PROCESS,     0x44000000
-    .equ PARENT_STACK,       0x45a00000
-    .equ PARENT_FDS,         0x45c00000
-    .equ PARENT_FRAME,       0x45c01000
-    .equ EXEC_ARGV,          0x45c02000
-    .equ EXEC_STRINGS,       0x45c03000
-    .equ PARENT_CWD,         0x45c04000
+    .equ USER_STACK_SIZE,    0x00800000
+    .equ KERNEL_STACK_TOP,   0x405ff000
+    .equ ELF_SOURCE,         0x43e00000
+    .equ ELF_SOURCE_LIMIT,   0x44600000
+    .equ PARENT_PROCESS,     0x44600000
+    .equ PARENT_STACK,       0x46600000
+    .equ PARENT_FDS,         0x46e00000
+    .equ PARENT_FRAME,       0x46e01000
+    .equ EXEC_ARGV,          0x46e02000
+    .equ EXEC_STRINGS,       0x46e03000
+    .equ PARENT_CWD,         0x46e04000
     .equ DISK_HEADER_MAGIC,  0x3245415244485842 /* "BXHDRAE2" */
     .equ SHELL_HEADER_MAGIC, 0x3256415244485842 /* "BXHDRAV2" */
 
@@ -86,8 +86,11 @@
     .if FILE_NAMES + (MAX_FILES * 128) > CWD_BUFFER
     .error "file names overlap cwd state"
     .endif
-    .if SHELL_LINE_BUFFER + 4096 > KERNEL_STACK_TOP
-    .error "shell line buffer overlaps the kernel stack"
+    .if SHELL_LINE_BUFFER + 4096 > USER_STACK_PHYS
+    .error "shell line buffer overlaps the user stack"
+    .endif
+    .if KERNEL_STACK_TOP > USER_PHYS
+    .error "kernel stack overlaps the user process arena"
     .endif
 
 _start:
@@ -161,12 +164,20 @@ el1_entry:
     cmp     x13, x11
     b.lo    4b
 
-    /* VA 0x07e00000 -> PA 0x47e00000, EL0 R/W and execute-never. */
-    ldr     x9, =LOW_PAGE_TABLE
+    /* VA 0x07800000..0x07ffffff: 8 MiB EL0 stack, execute-never. */
+    ldr     x9, =(LOW_PAGE_TABLE + 480)
     ldr     x10, =(USER_STACK_PHYS | (3 << 53) | 0x745)
-    str     x10, [x9, #504]
+    ldr     x11, =(USER_STACK_PHYS + USER_STACK_SIZE)
+    ldr     x12, =0x00200000
+    ldr     x13, =USER_STACK_PHYS
+6:  str     x10, [x9], #8
+    add     x10, x10, x12
+    add     x13, x13, x12
+    cmp     x13, x11
+    b.lo    6b
 
     /* EL1-only device mapping for the PL011 2 MiB window. */
+    ldr     x9, =LOW_PAGE_TABLE
     ldr     x10, =(UART0 | (3 << 53) | 0x401)
     str     x10, [x9, #576]
 
@@ -797,6 +808,27 @@ trap_failure:
     adrp    x0, trap_failure_message
     add     x0, x0, :lo12:trap_failure_message
     bl      uart_puts
+    adrp    x0, trap_esr_message
+    add     x0, x0, :lo12:trap_esr_message
+    bl      uart_puts
+    mrs     x0, esr_el1
+    bl      uart_puthex64
+    mov     x0, #10
+    bl      uart_putc
+    adrp    x0, trap_elr_message
+    add     x0, x0, :lo12:trap_elr_message
+    bl      uart_puts
+    mrs     x0, elr_el1
+    bl      uart_puthex64
+    mov     x0, #10
+    bl      uart_putc
+    adrp    x0, trap_far_message
+    add     x0, x0, :lo12:trap_far_message
+    bl      uart_puts
+    mrs     x0, far_el1
+    bl      uart_puthex64
+    mov     x0, #10
+    bl      uart_putc
     b       poweroff
 
 /* Fixed-size memory-file and descriptor tables for the stage0-posix surface. */
@@ -1805,9 +1837,15 @@ load_elf:
     mov     x20, x1               /* exact source bytes */
     cmp     x20, #64
     b.lo    elf_failure
-    ldr     x9, [x19]
-    ldr     x10, =0x00010102464c457f
-    cmp     x9, x10               /* ELF64, little-endian, current version */
+    ldr     w9, [x19]
+    ldr     w10, =0x464c457f
+    cmp     w9, w10               /* ELF magic */
+    b.ne    elf_failure
+    ldrh    w9, [x19, #4]
+    cmp     w9, #0x0102           /* ELF64, little-endian */
+    b.ne    elf_failure
+    ldrb    w9, [x19, #6]
+    cmp     w9, #1                /* identification version; OSABI is free */
     b.ne    elf_failure
     ldrh    w9, [x19, #16]
     cmp     w9, #2                /* ET_EXEC */
@@ -1858,21 +1896,34 @@ load_elf:
     ldr     x14, [x21, #8]        /* p_offset */
     adds    x16, x14, x15
     b.cs    elf_failure
-    cmp     x16, x20
+    cmp     x14, x20
     b.hi    elf_failure
+    sub     x16, x20, x14         /* source bytes available at p_offset */
+    sub     x11, x11, x15         /* BSS bytes after advertised file data */
+    mov     x18, #0               /* missing final file-page bytes */
+    cmp     x15, x16
+    b.ls    6f
+    sub     x18, x15, x16
+    cmp     x18, #4095
+    b.hi    elf_failure
+    mov     x15, x16
+6:
     add     x17, x19, x14         /* source bytes */
     ldr     x9, =USER_PHYS_OFFSET
     add     x13, x10, x9          /* physical destination */
-    sub     x11, x11, x15         /* BSS bytes */
 2:  cbz     x15, 3f
     ldrb    w9, [x17], #1
     strb    w9, [x13], #1
     sub     x15, x15, #1
     b       2b
-3:  cbz     x11, 4f
+3:  cbz     x18, 7f
+    strb    wzr, [x13], #1
+    sub     x18, x18, #1
+    b       3b
+7:  cbz     x11, 4f
     strb    wzr, [x13], #1
     sub     x11, x11, #1
-    b       3b
+    b       7b
 4:  cmp     x12, x24
     csel    x24, x12, x24, hi
     add     x26, x26, #1
@@ -1977,6 +2028,12 @@ user_end:
     .section .rodata
 trap_failure_message:
     .asciz  "builder-hex0-arm64 stage2 trap failure\n"
+trap_esr_message:
+    .asciz  "esr_el1: "
+trap_elr_message:
+    .asciz  "elr_el1: "
+trap_far_message:
+    .asciz  "far_el1: "
 disk_failure_message:
     .asciz  "builder-hex0-arm64 stage2 disk request failed\n"
 elf_failure_message:

@@ -70,6 +70,9 @@ test-arm64-stage2: arm64-stage2
 test-arm64-stage2-shell: arm64-stage2
 	QEMU=$(QEMU_ARM64) TIMEOUT=$(TIMEOUT) ./test-arm64-stage2-shell.sh
 
+test-arm64-stage2-chain: arm64-stage2
+	QEMU=$(QEMU_ARM64) TIMEOUT=$(TIMEOUT) ./test-arm64-stage2-chain.sh
+
 BUILD/builder-hex0-riscv64-stage1.bin: builder-hex0-riscv64-stage1.hex0 | BUILD
 	cut builder-hex0-riscv64-stage1.hex0 -f1 -d'#' | cut -f1 -d';' | $(XXD) -r -p > $@
 
@@ -226,4 +229,4 @@ clean:
 
 # Make does not check whether PHONY targets already exist as files or dirs.
 # It just invokes their recipes when they are targeted, no questions asked.
-.PHONY: clean arm64-stage1 arm64-stage1-oracle arm64-stage2 arm64-stage2-oracle test-arm64-stage1 test-arm64-stage2 test-arm64-stage2-shell riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-shell test-riscv64-stage2-chain test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost riscv64-tinyemu-stage1 riscv64-tinyemu-stage1-oracle riscv64-tinyemu-stage2-oracle test-riscv64-tinyemu
+.PHONY: clean arm64-stage1 arm64-stage1-oracle arm64-stage2 arm64-stage2-oracle test-arm64-stage1 test-arm64-stage2 test-arm64-stage2-shell test-arm64-stage2-chain riscv64-stage1 riscv64-stage1-oracle riscv64-stage2-oracle test-riscv64-stage1 test-riscv64-stage2 test-riscv64-stage2-shell test-riscv64-stage2-chain test-riscv64-stage2-stage0 test-riscv64-stage2-stage0-selfhost riscv64-tinyemu-stage1 riscv64-tinyemu-stage1-oracle riscv64-tinyemu-stage2-oracle test-riscv64-tinyemu

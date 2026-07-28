@@ -91,14 +91,15 @@ unlink, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 11,280-byte oracle image exactly; the current
+The checked hex0 reconstructs the 11,480-byte oracle image exactly; the current
 SHA-256 is
-`05e13158772f04d9b07a70026db2735ea3119e0394e62c2e94c6be5c9f4ba8b2`.
+`4221af32d933e767a2630028b151483778c38d911dc0e4416b0e4140098a02d3`.
 Run all three paths with:
 
 ```sh
 make test-arm64-stage2
 make test-arm64-stage2-shell
+STAGE0_DIR=/path/to/stage0 make test-arm64-stage2-chain
 ```
 
 The gate runs the built-in fixture and the same disk ELF over legacy and modern
@@ -129,8 +130,16 @@ an `f` request until the next external command, and writes the newest
 `/dev/hda` at `halt`. The focused gate streams a 66 KiB ELF, executes it,
 compiles a mixed-case/commented hex0 fixture, flushes five exact bytes to
 sector zero, and checks both virtio transports. Running the canonical
-AArch64 stage0 inputs through M2-Planet remains the acceptance boundary for
+AArch64 stage0 inputs through M2-Planet is the acceptance boundary for
 milestone 3.
+
+That boundary now passes. The chain gate streams the source set used by the
+independent ARM pivot, builds AArch64 hex0, hex1, catm, M0, cc_aarch64, and
+M2-Planet, then flushes the final 422,501-byte M2 ELF. Legacy and modern
+virtio both reproduce SHA-256
+`fa8db2bf931ac933157621e0894b4dddf15fb2bf585e4f6a5d32f20a058f1bef`,
+matching the user-mode pivot artifact byte for byte. The AArch32 execution
+pivot is the next builder milestone.
 
 ## Design and bug log
 
@@ -211,3 +220,22 @@ milestone 3.
   address zero because the shared linker script advertised an empty data
   segment. Adding one real data byte makes the segment valid and keeps the
   kernel's low-address ELF rejection covered.
+- The ELF identification check compared eight bytes at once and accidentally
+  required System V OSABI 0. Canonical stage0 uses valid GNU/Linux OSABI 3;
+  the loader now checks only magic, class, endianness, and identification
+  version.
+- Canonical `hex2-0` advertises 148 final `PT_LOAD` bytes beyond the physical
+  end of its file, relying on the zeroed final page accepted by Linux. The
+  loader permits only a final short tail of at most 4,095 bytes and zero-fills
+  it; offsets outside the file and larger truncations remain fatal.
+- The first 26 MiB user arena physically crossed the stage-2 page tables and
+  virtqueue pages. M0's 18 MiB break request zeroed the page tables and caused
+  a recursive EL1 fault. All kernel control pages now live below the user
+  arena, with compile-time checks around every later fixed region.
+- cc_aarch64 needs more than the initial 2 MiB stack, and M0 needs more than
+  the initial 26 MiB process arena when assembling M2. Stage 2 now maps and
+  snapshots an 8 MiB stack and provides a compacted 32 MiB process arena
+  without increasing the 128 MiB machine requirement.
+- Trap failures now report `ESR_EL1`, `ELR_EL1`, and `FAR_EL1`. Those
+  diagnostics identified both the page-table overwrite and exact stack/heap
+  boundaries; the success gates reject any occurrence of the failure marker.
