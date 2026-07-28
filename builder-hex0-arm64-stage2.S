@@ -23,23 +23,34 @@
     .equ PARENT_BRK_SLOT,    0x41002040
     .equ PARENT_BRK_MIN_SLOT, 0x41002048
     .equ PARENT_PROCESS_WORDS, 0x41002050
+    .equ NEXT_FILE_DATA_SLOT, 0x41002058
+    .equ SHELL_LBA_SLOT,     0x41002060
+    .equ SHELL_REMAINING_SLOT, 0x41002068
+    .equ SHELL_SECTOR_POS,   0x41002070
+    .equ SHELL_FLUSH_PENDING, 0x41002078
+    .equ SHELL_PROCESS_ACTIVE, 0x41002080
+    .equ SHELL_RESUME_SP,    0x41002088
+    .equ SHELL_RESUME_X30,   0x41002090
+    .equ SHELL_COMMAND_PTR,  0x41002098
+    .equ SHELL_ARGUMENT_PTR, 0x410020a0
     .equ VIRTQ_DESC,         0x41200000
     .equ VIRTQ_AVAIL,        0x41201000
     .equ VIRTQ_USED,         0x41202000
     .equ VIRTIO_HEADER,      0x41203000
     .equ VIRTIO_STATUS,      0x41203010
     .equ SECTOR_BUFFER,      0x41204000
-    .equ FILE_TABLE,         0x41400000
-    .equ FD_TABLE,           0x41401000
-    .equ FILE_NAMES,         0x41402000
-    .equ CWD_BUFFER,         0x41403000
-    .equ PATH_BUFFER,        0x41404000
-    .equ FILE_DATA,          0x41800000
+    .equ FILE_TABLE,         0x45d00000
+    .equ FD_TABLE,           0x45d02000
+    .equ FILE_NAMES,         0x45d03000
+    .equ CWD_BUFFER,         0x45d0b000
+    .equ PATH_BUFFER,        0x45d0c000
+    .equ SHELL_LINE_BUFFER,  0x45d0d000
+    .equ FILE_DATA,          0x42000000
+    .equ FILE_DATA_TOP,      0x43800000
     .equ FILE_RECORD_SIZE,   32
     .equ FD_RECORD_SIZE,     24
-    .equ MAX_FILES,          16
+    .equ MAX_FILES,          256
     .equ MAX_FDS,            32
-    .equ FILE_CAPACITY,      65536
     .equ USER_PHYS,          0x40600000
     .equ USER_VIRT,          0x00600000
     .equ USER_PHYS_OFFSET,   0x40000000
@@ -48,7 +59,7 @@
     .equ USER_STACK_TOP,     0x08000000
     .equ USER_STACK_SIZE,    0x00200000
     .equ KERNEL_STACK_TOP,   0x47dff000
-    .equ ELF_SOURCE,         0x43000000
+    .equ ELF_SOURCE,         0x43800000
     .equ ELF_SOURCE_LIMIT,   0x44000000
     .equ PARENT_PROCESS,     0x44000000
     .equ PARENT_STACK,       0x45a00000
@@ -58,6 +69,7 @@
     .equ EXEC_STRINGS,       0x45c03000
     .equ PARENT_CWD,         0x45c04000
     .equ DISK_HEADER_MAGIC,  0x3245415244485842 /* "BXHDRAE2" */
+    .equ SHELL_HEADER_MAGIC, 0x3256415244485842 /* "BXHDRAV2" */
 
     .if PARENT_PROCESS + (USER_HEAP_TOP - USER_VIRT) > PARENT_STACK
     .error "parent process snapshot overlaps parent stack"
@@ -67,6 +79,15 @@
     .endif
     .if EXEC_STRINGS + 0xc00 > PARENT_CWD
     .error "exec string scratch overlaps parent cwd"
+    .endif
+    .if FILE_DATA_TOP > ELF_SOURCE
+    .error "memory-file payloads overlap the disk ELF staging area"
+    .endif
+    .if FILE_NAMES + (MAX_FILES * 128) > CWD_BUFFER
+    .error "file names overlap cwd state"
+    .endif
+    .if SHELL_LINE_BUFFER + 4096 > KERNEL_STACK_TOP
+    .error "shell line buffer overlaps the kernel stack"
     .endif
 
 _start:
@@ -459,6 +480,8 @@ syscall_write_file:
     cmp     x13, x14
     csel    x14, x13, x14, hi
     str     x14, [x10, #16]
+    mov     x0, x10
+    bl      finalize_file
     mov     x0, x2
     b       trap_return
 
@@ -688,8 +711,23 @@ syscall_exit:
     ldr     x9, =CHILD_PROCESS_SLOT
     ldr     x9, [x9]
     cbnz    x9, restore_parent
+    ldr     x9, =SHELL_PROCESS_ACTIVE
+    ldr     x9, [x9]
+    cbnz    x9, restore_shell
     cbnz    x0, trap_failure
     b       poweroff
+
+restore_shell:
+    mov     x10, x0
+    ldr     x9, =SHELL_PROCESS_ACTIVE
+    str     xzr, [x9]
+    ldr     x9, =SHELL_RESUME_SP
+    ldr     x9, [x9]
+    mov     sp, x9
+    ldr     x9, =SHELL_RESUME_X30
+    ldr     x30, [x9]
+    mov     x0, x10
+    ret
 
 restore_parent:
     ldr     x9, =CHILD_EXIT_STATUS
@@ -780,7 +818,6 @@ init_filesystem:
     add     x13, x13, :lo12:input_data_end
     sub     x14, x13, x12
     str     x14, [x9, #16]        /* length */
-    ldr     x14, =FILE_CAPACITY
     str     x14, [x9, #24]        /* capacity */
 
     adrp    x12, input_name
@@ -815,6 +852,24 @@ init_filesystem:
 
     ldr     x9, =FILE_COUNT_SLOT
     mov     x10, #2
+    str     x10, [x9]
+    ldr     x9, =CWD_BUFFER
+    mov     w10, #'/'
+    strb    w10, [x9]
+    strb    wzr, [x9, #1]
+    ldr     x9, =CHILD_PROCESS_SLOT
+    str     xzr, [x9]
+    str     xzr, [x9, #8]
+    ldr     x9, =NEXT_FILE_DATA_SLOT
+    ldr     x10, =(FILE_DATA + 32)
+    str     x10, [x9]
+    ret
+
+init_empty_filesystem:
+    ldr     x9, =FILE_COUNT_SLOT
+    str     xzr, [x9]
+    ldr     x9, =NEXT_FILE_DATA_SLOT
+    ldr     x10, =FILE_DATA
     str     x10, [x9]
     ldr     x9, =CWD_BUFFER
     mov     w10, #'/'
@@ -924,8 +979,11 @@ find_file:
     mov     x17, x0
     ldr     x9, =FILE_COUNT_SLOT
     ldr     x10, [x9]
+    cbz     x10, 4f
+    sub     x10, x10, #1
     ldr     x9, =FILE_TABLE
-1:  cbz     x10, 4f
+    add     x9, x9, x10, lsl #5
+1:
     ldr     x11, [x9]
     cbz     x11, 3f
     mov     x12, x17
@@ -936,8 +994,9 @@ find_file:
     cbnz    w13, 2b
     mov     x0, x9
     ret
-3:  add     x9, x9, #FILE_RECORD_SIZE
+3:  cbz     x10, 4f
     sub     x10, x10, #1
+    sub     x9, x9, #FILE_RECORD_SIZE
     b       1b
 4:  mov     x0, #0
     ret
@@ -964,17 +1023,527 @@ create_file:
     b       1b
 2:  strb    wzr, [x13]
     str     x12, [x11]
-    ldr     x12, =FILE_DATA
-    add     x12, x12, x10, lsl #16
+    ldr     x12, =NEXT_FILE_DATA_SLOT
+    ldr     x12, [x12]
+    ldr     x13, =FILE_DATA_TOP
+    cmp     x12, x13
+    b.hs    4f
     str     x12, [x11, #8]
     str     xzr, [x11, #16]
-    ldr     x12, =FILE_CAPACITY
-    str     x12, [x11, #24]
+    sub     x13, x13, x12
+    str     x13, [x11, #24]
     add     x10, x10, #1
     str     x10, [x9]
     mov     x0, x11
     ret
 4:  mov     x0, #0
+    ret
+
+/* Advance the monotonic payload allocator past x0's current file length. */
+finalize_file:
+    ldr     x9, [x0, #8]
+    ldr     x10, [x0, #16]
+    add     x9, x9, x10
+    add     x9, x9, #15
+    and     x9, x9, #0xfffffffffffffff0
+    ldr     x10, =NEXT_FILE_DATA_SLOT
+    ldr     x11, [x10]
+    cmp     x9, x11
+    b.ls    1f
+    str     x9, [x10]
+1:  ret
+
+/* x0/x1=NUL-terminated strings; return one when equal. */
+strings_equal:
+1:  ldrb    w9, [x0], #1
+    ldrb    w10, [x1], #1
+    cmp     w9, w10
+    b.ne    2f
+    cbnz    w9, 1b
+    mov     x0, #1
+    ret
+2:  mov     x0, #0
+    ret
+
+/* Stream one command byte from the disk script; -1 marks exact-length EOF. */
+shell_getc:
+    str     x30, [sp, #-16]!
+    ldr     x9, =SHELL_REMAINING_SLOT
+    ldr     x10, [x9]
+    cbz     x10, 3f
+    ldr     x11, =SHELL_SECTOR_POS
+    ldr     x12, [x11]
+    cmp     x12, #512
+    b.lo    1f
+    ldr     x13, =SHELL_LBA_SLOT
+    ldr     x0, [x13]
+    ldr     x1, =SECTOR_BUFFER
+    bl      read_sector
+    ldr     x13, =SHELL_LBA_SLOT
+    ldr     x14, [x13]
+    add     x14, x14, #1
+    str     x14, [x13]
+    ldr     x11, =SHELL_SECTOR_POS
+    mov     x12, #0
+1:  ldr     x13, =SECTOR_BUFFER
+    ldrb    w0, [x13, x12]
+    add     x12, x12, #1
+    str     x12, [x11]
+    ldr     x9, =SHELL_REMAINING_SLOT
+    ldr     x10, [x9]
+    sub     x10, x10, #1
+    str     x10, [x9]
+    b       4f
+3:  mov     x0, #-1
+4:  ldr     x30, [sp], #16
+    ret
+
+/* Read one command line into the fixed 4 KiB buffer. */
+shell_getline:
+    stp     x19, x20, [sp, #-32]!
+    str     x30, [sp, #16]
+    ldr     x19, =SHELL_LINE_BUFFER
+    mov     x20, x19
+1:  bl      shell_getc
+    tbnz    x0, #63, 3f
+    cmp     x0, #10
+    b.eq    2f
+    ldr     x9, =(SHELL_LINE_BUFFER + 4095)
+    cmp     x19, x9
+    b.hs    4f
+    strb    w0, [x19], #1
+    b       1b
+2:  strb    wzr, [x19]
+    mov     x0, x20
+    b       5f
+3:  cmp     x19, x20
+    b.eq    5f
+    strb    wzr, [x19]
+    mov     x0, x20
+    b       5f
+4:  mov     x0, #-2
+5:  ldr     x30, [sp, #16]
+    ldp     x19, x20, [sp], #32
+    ret
+
+/* x0=cursor; return token in x0 and following cursor in x1. */
+next_token:
+1:  ldrb    w9, [x0]
+    cmp     w9, #32
+    b.eq    2f
+    cmp     w9, #9
+    b.ne    3f
+2:  add     x0, x0, #1
+    b       1b
+3:  mov     x1, x0
+4:  ldrb    w9, [x1]
+    cbz     w9, 6f
+    cmp     w9, #32
+    b.eq    5f
+    cmp     w9, #9
+    b.eq    5f
+    add     x1, x1, #1
+    b       4b
+5:  strb    wzr, [x1], #1
+6:  ret
+
+/* x0=unsigned decimal string; return the value or -1 when malformed. */
+parse_decimal:
+    mov     x9, x0
+    mov     x0, #0
+    mov     x12, #0
+1:  ldrb    w10, [x9], #1
+    cbz     w10, 3f
+    cmp     w10, #'0'
+    b.lo    4f
+    cmp     w10, #('9' + 1)
+    b.hs    4f
+    sub     w10, w10, #'0'
+    lsl     x11, x0, #3
+    add     x0, x11, x0, lsl #1
+    add     x0, x0, x10
+    mov     x12, #1
+    b       1b
+3:  cbz     x12, 4f
+    ret
+4:  mov     x0, #-1
+    ret
+
+/* src N PATH */
+shell_src:
+    sub     sp, sp, #64
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    stp     x23, x30, [sp, #32]
+    bl      next_token
+    mov     x19, x1
+    bl      parse_decimal
+    tbnz    x0, #63, 4f
+    mov     x20, x0
+    mov     x0, x19
+    bl      next_token
+    ldrb    w9, [x0]
+    cbz     w9, 4f
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, 4f
+    bl      create_file
+    cbz     x0, 4f
+    mov     x21, x0
+    ldr     x9, [x21, #24]
+    cmp     x20, x9
+    b.hi    4f
+    ldr     x22, [x21, #8]
+    mov     x23, x20
+1:  cbz     x23, 2f
+    bl      shell_getc
+    tbnz    x0, #63, 4f
+    strb    w0, [x22], #1
+    sub     x23, x23, #1
+    b       1b
+2:  str     x20, [x21, #16]
+    mov     x0, x21
+    bl      finalize_file
+    mov     x0, #0
+    b       5f
+4:  mov     x0, #-1
+5:  ldp     x23, x30, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp, #0]
+    add     sp, sp, #64
+    ret
+
+/* x0=source, x1=source bytes, x2=output; return output bytes. */
+hex0_compile_memory:
+    mov     x9, x0
+    add     x10, x0, x1
+    mov     x11, x2
+    mov     x12, #0               /* have high nibble */
+    mov     x13, #0               /* high nibble */
+    mov     x14, #0               /* in line comment */
+1:  cmp     x9, x10
+    b.hs    8f
+    ldrb    w15, [x9], #1
+    cbz     x14, 3f
+    cmp     w15, #10
+    b.ne    1b
+    mov     x14, #0
+    b       1b
+3:  cmp     w15, #'#'
+    b.eq    7f
+    cmp     w15, #';'
+    b.eq    7f
+    cmp     w15, #'0'
+    b.lo    1b
+    cmp     w15, #('9' + 1)
+    b.lo    4f
+    cmp     w15, #'A'
+    b.lo    1b
+    cmp     w15, #('F' + 1)
+    b.lo    5f
+    cmp     w15, #'a'
+    b.lo    1b
+    cmp     w15, #('f' + 1)
+    b.hs    1b
+    sub     w15, w15, #('a' - 10)
+    b       6f
+4:  sub     w15, w15, #'0'
+    b       6f
+5:  sub     w15, w15, #('A' - 10)
+6:  cbnz    x12, 9f
+    lsl     w13, w15, #4
+    mov     x12, #1
+    b       1b
+9:  orr     w13, w13, w15
+    strb    w13, [x11], #1
+    mov     x12, #0
+    b       1b
+7:  mov     x14, #1
+    b       1b
+8:  sub     x0, x11, x2
+    ret
+
+/* hex0 INPUT OUTPUT */
+shell_hex0:
+    sub     sp, sp, #32
+    stp     x19, x20, [sp, #0]
+    stp     x21, x30, [sp, #16]
+    bl      next_token
+    mov     x19, x1
+    ldrb    w9, [x0]
+    cbz     w9, 4f
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, 4f
+    bl      find_file
+    cbz     x0, 4f
+    mov     x20, x0
+    mov     x0, x19
+    bl      next_token
+    ldrb    w9, [x0]
+    cbz     w9, 4f
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, 4f
+    bl      create_file
+    cbz     x0, 4f
+    mov     x21, x0
+    ldr     x0, [x20, #8]
+    ldr     x1, [x20, #16]
+    ldr     x9, [x21, #24]
+    add     x10, x1, #1
+    lsr     x10, x10, #1
+    cmp     x10, x9               /* worst case: every source byte is hex */
+    b.hi    4f
+    ldr     x2, [x21, #8]
+    bl      hex0_compile_memory
+    ldr     x9, [x21, #24]
+    cmp     x0, x9
+    b.hi    4f
+    str     x0, [x21, #16]
+    mov     x0, x21
+    bl      finalize_file
+    mov     x0, #0
+    b       5f
+4:  mov     x0, #-1
+5:  ldp     x21, x30, [sp, #16]
+    ldp     x19, x20, [sp, #0]
+    add     sp, sp, #32
+    ret
+
+/* Write the newest /dev/hda memory file over the block device. */
+flush_disk:
+    sub     sp, sp, #48
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    str     x30, [sp, #32]
+    adrp    x0, dev_hda_name
+    add     x0, x0, :lo12:dev_hda_name
+    bl      find_file
+    cbz     x0, 5f
+    ldr     x19, [x0, #8]
+    ldr     x20, [x0, #16]
+    mov     x0, x20
+    bl      uart_puthex64
+    mov     x0, #10
+    bl      uart_putc
+    mov     x21, #0
+1:  cbz     x20, 4f
+    ldr     x9, =SECTOR_BUFFER
+    add     x10, x9, #512
+2:  str     xzr, [x9], #8
+    cmp     x9, x10
+    b.lo    2b
+    mov     x22, #512
+    cmp     x20, x22
+    csel    x22, x20, x22, lo
+    mov     x9, x19
+    ldr     x10, =SECTOR_BUFFER
+    mov     x11, x22
+6:  cbz     x11, 7f
+    ldrb    w12, [x9], #1
+    strb    w12, [x10], #1
+    sub     x11, x11, #1
+    b       6b
+7:  mov     x0, x21
+    ldr     x1, =SECTOR_BUFFER
+    bl      write_sector
+    add     x19, x19, x22
+    sub     x20, x20, x22
+    add     x21, x21, #1
+    b       1b
+4:  mov     x0, #0
+    b       8f
+5:  mov     x0, #-1
+8:  ldr     x30, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp, #0]
+    add     sp, sp, #48
+    ret
+
+shell_maybe_flush:
+    str     x30, [sp, #-16]!
+    ldr     x9, =SHELL_FLUSH_PENDING
+    ldr     x10, [x9]
+    cbz     x10, 1f
+    str     xzr, [x9]
+    bl      flush_disk
+    b       2f
+1:  mov     x0, #0
+2:  ldr     x30, [sp], #16
+    ret
+
+/* x0=file record, x1=argv[0], x2=optional argv[1]. */
+launch_shell_process:
+    mov     x9, x1
+    mov     x10, #0
+0:  ldrb    w11, [x9], #1
+    add     x10, x10, #1
+    cbnz    w11, 0b
+    cbz     x2, 4f
+    mov     x9, x2
+0:  ldrb    w11, [x9], #1
+    add     x10, x10, #1
+    cbnz    w11, 0b
+4:  cmp     x10, #0xc00
+    b.hi    launch_shell_too_big
+
+    ldr     x9, =SHELL_RESUME_SP
+    mov     x10, sp
+    str     x10, [x9]
+    ldr     x9, =SHELL_RESUME_X30
+    str     x30, [x9]
+    ldr     x9, =SHELL_COMMAND_PTR
+    str     x1, [x9]
+    ldr     x9, =SHELL_ARGUMENT_PTR
+    str     x2, [x9]
+    ldr     x1, [x0, #16]
+    ldr     x0, [x0, #8]
+    bl      load_elf
+    ldr     x9, =USER_ENTRY_SLOT
+    str     x0, [x9]
+
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    mov     x10, #1
+    ldr     x11, =SHELL_ARGUMENT_PTR
+    ldr     x11, [x11]
+    cbz     x11, 1f
+    ldrb    w12, [x11]
+    cbz     w12, 1f
+    mov     x10, #2
+1:  str     x10, [x9]
+    ldr     x10, =(USER_STACK_TOP - 4096 + 0x400)
+    str     x10, [x9, #8]
+    ldr     x0, =SHELL_COMMAND_PTR
+    ldr     x0, [x0]
+    add     x1, x9, #0x400
+    bl      copy_string
+    mov     x10, x1
+    ldr     x11, =SHELL_ARGUMENT_PTR
+    ldr     x11, [x11]
+    cbz     x11, 2f
+    ldrb    w12, [x11]
+    cbz     w12, 2f
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    ldr     x12, =USER_PHYS_OFFSET
+    sub     x12, x10, x12
+    str     x12, [x9, #16]
+    mov     x0, x11
+    mov     x1, x10
+    bl      copy_string
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     xzr, [x9, #24]
+    str     xzr, [x9, #32]
+    b       3f
+2:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     xzr, [x9, #16]
+    str     xzr, [x9, #24]
+3:  ldr     x9, =SHELL_PROCESS_ACTIVE
+    mov     x10, #1
+    str     x10, [x9]
+    ldr     x9, =(USER_STACK_TOP - 4096)
+    msr     sp_el0, x9
+    ldr     x9, =USER_ENTRY_SLOT
+    ldr     x9, [x9]
+    msr     elr_el1, x9
+    mov     x9, #0x3c0
+    msr     spsr_el1, x9
+    eret
+
+launch_shell_too_big:
+    mov     x0, #-7               /* -E2BIG */
+    ret
+
+internal_shell:
+    sub     sp, sp, #64
+    stp     x19, x20, [sp, #0]
+    stp     x21, x30, [sp, #16]
+1:  bl      shell_getline
+    cmp     x0, #-1
+    b.eq    shell_finish
+    tbnz    x0, #63, shell_error
+    bl      next_token
+    mov     x19, x0
+    mov     x20, x1
+    ldrb    w9, [x19]
+    cbz     w9, 1b
+
+    mov     x0, x19
+    adrp    x1, command_src
+    add     x1, x1, :lo12:command_src
+    bl      strings_equal
+    cbnz    x0, shell_handle_src
+    mov     x0, x19
+    adrp    x1, command_hex0
+    add     x1, x1, :lo12:command_hex0
+    bl      strings_equal
+    cbnz    x0, shell_handle_hex0
+    mov     x0, x19
+    adrp    x1, command_flush
+    add     x1, x1, :lo12:command_flush
+    bl      strings_equal
+    cbnz    x0, shell_handle_flush
+    mov     x0, x19
+    adrp    x1, command_halt
+    add     x1, x1, :lo12:command_halt
+    bl      strings_equal
+    cbnz    x0, shell_finish
+
+    bl      shell_maybe_flush
+    cbnz    x0, shell_error
+    mov     x0, x19
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, shell_error
+    bl      find_file
+    cbz     x0, shell_error
+    mov     x21, x0
+    mov     x0, x20
+    bl      next_token
+    mov     x2, x0
+    mov     x1, x19
+    mov     x0, x21
+    bl      launch_shell_process
+    cbnz    x0, shell_error
+    b       1b
+
+shell_handle_src:
+    mov     x0, x20
+    bl      shell_src
+    cbnz    x0, shell_error
+    b       1b
+
+shell_handle_hex0:
+    mov     x0, x20
+    bl      shell_hex0
+    cbnz    x0, shell_error
+    b       1b
+
+shell_handle_flush:
+    ldr     x9, =SHELL_FLUSH_PENDING
+    mov     x10, #1
+    str     x10, [x9]
+    b       1b
+
+shell_finish:
+    bl      flush_disk
+    cbnz    x0, shell_error
+    adrp    x0, shell_success_message
+    add     x0, x0, :lo12:shell_success_message
+    bl      uart_puts
+    mov     x0, #0
+    b       shell_return
+
+shell_error:
+    adrp    x0, shell_failure_message
+    add     x0, x0, :lo12:shell_failure_message
+    bl      uart_puts
+    mov     x0, #1
+
+shell_return:
+    ldp     x21, x30, [sp, #16]
+    ldp     x19, x20, [sp, #0]
+    add     sp, sp, #64
     ret
 
 /*
@@ -993,7 +1562,27 @@ load_disk_elf_optional:
     ldr     x10, [x9]
     ldr     x11, =DISK_HEADER_MAGIC
     cmp     x10, x11
+    b.eq    1f
+    ldr     x11, =SHELL_HEADER_MAGIC
+    cmp     x10, x11
     b.ne    3f
+    ldr     x10, [x9, #8]
+    ldr     x11, =SHELL_LBA_SLOT
+    str     x10, [x11]
+    ldr     x10, [x9, #16]
+    ldr     x11, =SHELL_REMAINING_SLOT
+    str     x10, [x11]
+    ldr     x11, =SHELL_SECTOR_POS
+    mov     x10, #512
+    str     x10, [x11]
+    ldr     x11, =SHELL_FLUSH_PENDING
+    str     xzr, [x11]
+    str     xzr, [x11, #8]
+    bl      init_empty_filesystem
+    bl      internal_shell
+    cbnz    x0, trap_failure
+    b       poweroff
+1:
     ldr     x0, [x9, #8]
     ldr     x19, [x9, #16]
     cbz     x19, elf_failure
@@ -1125,6 +1714,10 @@ virtio_init_legacy:
 /* x0=sector, x1=buffer */
 read_sector:
     mov     x2, #0
+    b       virtio_sector
+
+write_sector:
+    mov     x2, #1
 
 virtio_sector:
     ldr     x9, =VIRTIO_HEADER
@@ -1146,7 +1739,10 @@ virtio_sector:
     str     x1, [x9, #16]
     mov     w10, #512
     str     w10, [x9, #24]
-    mov     w10, #3               /* NEXT | WRITE */
+    mov     w10, #1               /* NEXT */
+    cbnz    x2, 5f
+    orr     w10, w10, #2          /* device writes on disk read */
+5:
     strh    w10, [x9, #28]
     mov     w10, #2
     strh    w10, [x9, #30]
@@ -1389,6 +1985,20 @@ disk_elf_message:
     .asciz  "builder-hex0-arm64 stage2 disk ELF64 loaded\n"
 disk_brk_message:
     .asciz  "builder-hex0-arm64 stage2 initial brk: 0x"
+shell_failure_message:
+    .asciz  "builder-hex0-arm64 shell failed\n"
+shell_success_message:
+    .asciz  "builder-hex0-arm64 shell and flush passed\n"
+command_src:
+    .asciz  "src"
+command_hex0:
+    .asciz  "hex0"
+command_flush:
+    .asciz  "f"
+command_halt:
+    .asciz  "halt"
+dev_hda_name:
+    .asciz  "/dev/hda"
 input_name:
     .asciz  "/input"
 exec_target_name:

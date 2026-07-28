@@ -91,13 +91,14 @@ unlink, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 9,040-byte oracle image exactly; the current
+The checked hex0 reconstructs the 11,280-byte oracle image exactly; the current
 SHA-256 is
-`ad2245d7e9671c0c060e8d8f15b73f820b88d4ccfbf7db4d2229cf9ebb710334`.
+`05e13158772f04d9b07a70026db2735ea3119e0394e62c2e94c6be5c9f4ba8b2`.
 Run all three paths with:
 
 ```sh
 make test-arm64-stage2
+make test-arm64-stage2-shell
 ```
 
 The gate runs the built-in fixture and the same disk ELF over legacy and modern
@@ -111,9 +112,25 @@ virtual cwd, creates and finds a relative path, checks access, applies the
 bootstrap chmod no-op, unlinks it, and verifies that a later lookup returns
 `ENOENT`. Finally, it rejects a non-ELF exec, snapshots a parent with `clone`,
 replaces the child through `execve`, restores the parent on child exit, and
-checks the child's argv-dependent status through `wait4`. The builder shell,
-canonical stage0 inputs, and any syscall gaps they expose are the next
-increments.
+checks the child's argv-dependent status through `wait4`. Canonical stage0
+inputs and any syscall gaps they expose are the next increments.
+
+The internal shell uses a separate sector-zero contract:
+
+| Offset | Value |
+| ---: | --- |
+| `0x00` | magic `BXHDRAV2` |
+| `0x08` | first script sector |
+| `0x10` | exact script byte count |
+
+It streams `src N PATH` payloads without loading the script into RAM, compiles
+`hex0 INPUT OUTPUT`, launches one-argument AArch64 ELF commands at EL0, delays
+an `f` request until the next external command, and writes the newest
+`/dev/hda` at `halt`. The focused gate streams a 66 KiB ELF, executes it,
+compiles a mixed-case/commented hex0 fixture, flushes five exact bytes to
+sector zero, and checks both virtio transports. Running the canonical
+AArch64 stage0 inputs through M2-Planet remains the acceptance boundary for
+milestone 3.
 
 ## Design and bug log
 
@@ -179,3 +196,18 @@ increments.
   scratch, rebuilds the Linux AArch64 startup stack, and clears the new
   register frame. An embedded ELF validates argc, both arguments, and the
   null terminator before exiting with the status checked by `wait4`.
+- The original 16 fixed 64 KiB payload slots could not ingest a 66 KiB test
+  ELF and occupied physical pages inside the permitted user heap. Shell files
+  now use 256 fixed metadata/name records and a checked 24 MiB monotonic
+  payload arena immediately above user memory and below ELF staging.
+- Append-only versions require newest-first lookup. The first ARM table walk
+  scanned from record zero and would have returned stale output after a path
+  was recreated; lookup now walks backward and still skips unlink tombstones.
+- Virtio write descriptors invert the data-buffer direction used by reads.
+  The shared request path now sets request type and descriptor flags from an
+  explicit direction, while the dual-transport shell gate checks the mutated
+  disk bytes after QEMU exits.
+- The first shell exit fixture had an empty second `PT_LOAD` at virtual
+  address zero because the shared linker script advertised an empty data
+  segment. Adding one real data byte makes the segment valid and keeps the
+  kernel's low-address ELF rejection covered.
