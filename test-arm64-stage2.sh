@@ -39,7 +39,7 @@ run_disk_gate()
 	grep -q 'builder-hex0-arm64 path syscalls passed' "$log"
 	grep -q 'builder-hex0-arm64 process syscalls passed' "$log"
 	grep -q 'builder-hex0-arm64 disk ELF64, files, and brk passed' "$log"
-	if grep -Eq 'stage2 (trap failure|disk request failed|invalid ELF64 image)' "$log"; then
+	if grep -Eq 'stage2 (trap failure|disk request failed|invalid ELF image)' "$log"; then
 		exit 1
 	fi
 }

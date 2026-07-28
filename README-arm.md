@@ -74,13 +74,17 @@ The oracle and both emulator transports pass.
 
 Stage 2 establishes 39-bit translation tables, gives EL1 an identity-mapped
 kernel/device address space, maps separate EL0 image and stack regions, and
-enters an AArch64 executable through `eret`. With no block device it retains a
-built-in privilege fixture. A disk with the stage-2 header below instead loads
-and validates an ELF64/AArch64 `ET_EXEC`, copies every `PT_LOAD` segment,
-clears BSS, and initializes the process break. The lower-EL synchronous vector
-preserves all 31 general registers and implements raw Linux AArch64
+enters an AArch64 or AArch32 executable through `eret`. With no block device
+it retains a built-in AArch64 privilege fixture. A disk with the stage-2
+header below instead loads and validates an ELF64/AArch64 or ELF32/ARM
+`ET_EXEC`, copies every `PT_LOAD` segment, clears BSS, and initializes the
+process break. The lower-EL synchronous vectors preserve the mapped general
+registers and implement raw Linux AArch64
 `unlinkat`/`faccessat`/`chdir`/`fchmodat`/`openat`/`close`/`lseek`/`read`/
 `write`/`brk`/`clone`/`execve`/`wait4`/`exit`/`exit_group` calls through `svc`.
+The AArch32 vector translates the ARM EABI
+`open`/`close`/`unlink`/`access`/`chdir`/`lseek`/`read`/`write`/`brk`/`fork`/
+`execve`/`wait4`/`exit`/`exit_group` numbers onto the same implementation.
 A fixed-size bootstrap filesystem supplies `/input`, canonicalizes absolute
 and cwd-relative paths, and supports file creation, truncation, lookup,
 unlink, rewinding, and bounded reads and writes.
@@ -91,23 +95,24 @@ unlink, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 11,480-byte oracle image exactly; the current
+The checked hex0 reconstructs the 12,536-byte oracle image exactly; the current
 SHA-256 is
-`4221af32d933e767a2630028b151483778c38d911dc0e4416b0e4140098a02d3`.
-Run all three paths with:
+`9b4b089dc37588324695e026fd7230352d6b0f598d4de30946332c623fceeb48`.
+Run the covered paths with:
 
 ```sh
 make test-arm64-stage2
+make test-arm64-stage2-aarch32
 make test-arm64-stage2-shell
 STAGE0_DIR=/path/to/stage0 make test-arm64-stage2-chain
 ```
 
-The gate runs the built-in fixture and the same disk ELF over legacy and modern
-virtio-mmio. It pre-dirties BSS and heap pages, then proves that the ELF loader
-and `brk` clear them. The `brk` growth crosses a 2 MiB block boundary, so the
-test also covers every initial user mapping needed by the fixture. The
-external process reads the seeded `/input`, creates and truncates `/output`,
-writes it, seeks to the beginning, reads it back, and closes both descriptors.
+The gates run the built-in fixture and disk ELFs over legacy and modern
+virtio-mmio. They pre-dirty BSS and heap pages, then prove that both ELF
+loaders and `brk` clear them. The AArch64 `brk` growth crosses a 2 MiB block
+boundary, so the test also covers every initial user mapping needed by the
+fixture. The external processes read the seeded `/input`, create and truncate
+an output, write it, and close their descriptors.
 It also canonicalizes repeated separators and dot components, changes its
 virtual cwd, creates and finds a relative path, checks access, applies the
 bootstrap chmod no-op, unlinks it, and verifies that a later lookup returns
@@ -139,7 +144,11 @@ M2-Planet, then flushes the final 422,501-byte M2 ELF. Legacy and modern
 virtio both reproduce SHA-256
 `fa8db2bf931ac933157621e0894b4dddf15fb2bf585e4f6a5d32f20a058f1bef`,
 matching the user-mode pivot artifact byte for byte. The AArch32 execution
-pivot is the next builder milestone.
+pivot now has a focused gate: an ELF32/ARM image enters AArch32 EL0, exercises
+the ARM EABI and BSS/stack contract, returns to the AArch64 builder shell, and
+validates 32-bit `argc`/`argv`/`envp`. The gate passes both virtio transports.
+Executing the independently reproduced ARMv7 M2-Planet and comparing its
+output is the remaining acceptance step for milestone 4.
 
 ## Design and bug log
 
@@ -239,3 +248,12 @@ pivot is the next builder milestone.
 - Trap failures now report `ESR_EL1`, `ELR_EL1`, and `FAR_EL1`. Those
   diagnostics identified both the page-table overwrite and exact stack/heap
   boundaries; the success gates reject any occurrence of the failure marker.
+- Returning to an AArch32 lower EL requires an AArch32 CPSR value, not the
+  numerically similar AArch64 PSTATE mask. The first pivot used `0x3d0`;
+  AArch32 interprets bit 9 as the data-endianness bit, so user instructions
+  ran but literal loads were byte-swapped. The corrected `0x1d0` selects
+  little-endian ARM user mode with asynchronous exceptions masked.
+- AArch32 user registers map onto the low halves of the AArch64 register bank.
+  The SVC32 vector saves the complete bank first, then explicitly zero-extends
+  R0-R7 before shared pointer arithmetic because their upper halves are
+  architecturally unknown.

@@ -33,6 +33,7 @@
     .equ SHELL_RESUME_X30,   0x40202090
     .equ SHELL_COMMAND_PTR,  0x40202098
     .equ SHELL_ARGUMENT_PTR, 0x402020a0
+    .equ PROCESS_ABI_SLOT,   0x402020a8 /* 0=AArch64, 1=AArch32 */
     .equ VIRTQ_DESC,         0x40400000
     .equ VIRTQ_AVAIL,        0x40401000
     .equ VIRTQ_USED,         0x40402000
@@ -130,6 +131,8 @@ el1_entry:
 2:  ldr     x9, =USER_ENTRY_SLOT
     ldr     x10, =USER_VIRT
     str     x10, [x9]
+    ldr     x9, =PROCESS_ABI_SLOT
+    str     xzr, [x9]
 
     /* One L1 root and one low L2 table cover this stage. */
     ldr     x9, =ROOT_PAGE_TABLE
@@ -213,12 +216,23 @@ el1_entry:
     ldr     x9, =USER_ENTRY_SLOT
     str     x0, [x9]
 5:
-    ldr     x9, =USER_STACK_TOP
-    msr     sp_el0, x9
     ldr     x9, =USER_ENTRY_SLOT
+    ldr     x0, [x9]
+    ldr     x1, =USER_STACK_TOP
+    b       enter_user
+
+/* x0=entry, x1=initial stack. PROCESS_ABI_SLOT selects the lower-EL state. */
+enter_user:
+    msr     elr_el1, x0
+    ldr     x9, =PROCESS_ABI_SLOT
     ldr     x9, [x9]
-    msr     elr_el1, x9
+    cbnz    x9, 1f
+    msr     sp_el0, x1
     mov     x9, #0x3c0            /* EL0t with DAIF masked */
+    msr     spsr_el1, x9
+    eret
+1:  mov     w13, w1               /* AArch32 R13_usr maps to W13 */
+    mov     x9, #0x1d0            /* AArch32 user mode, LE, A/I/F masked */
     msr     spsr_el1, x9
     eret
 
@@ -248,7 +262,7 @@ vector_table:
     .balign 128
     b       trap_failure          /* lower EL, AArch64: SError */
     .balign 128
-    b       trap_failure          /* lower EL, AArch32: sync */
+    b       lower_a32_sync        /* lower EL, AArch32: sync */
     .balign 128
     b       trap_failure          /* lower EL, AArch32: IRQ */
     .balign 128
@@ -312,6 +326,94 @@ lower_a64_sync:
     b.eq    syscall_exit
     mov     x0, #-38              /* -ENOSYS */
     b       trap_return
+
+lower_a32_sync:
+    sub     sp, sp, #256
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x9, [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    str     x30, [sp, #240]
+
+    mrs     x9, esr_el1
+    lsr     x9, x9, #26
+    cmp     x9, #0x11             /* SVC from AArch32 */
+    b.ne    trap_failure
+
+    /*
+     * AArch32 only defines the low halves of its mapped registers when the
+     * exception is taken into AArch64. Zero-extend syscall arguments before
+     * the shared 64-bit implementation dereferences or compares them.
+     */
+    mov     w0, w0
+    mov     w1, w1
+    mov     w2, w2
+    mov     w3, w3
+    mov     w4, w4
+    mov     w5, w5
+    mov     w6, w6
+    mov     w7, w7
+
+    cmp     w7, #5                /* Linux ARM open */
+    b.eq    syscall_a32_open
+    cmp     w7, #6                /* Linux ARM close */
+    b.eq    syscall_close
+    cmp     w7, #10               /* Linux ARM unlink */
+    b.eq    syscall_a32_unlink
+    cmp     w7, #33               /* Linux ARM access */
+    b.eq    syscall_a32_access
+    cmp     w7, #12               /* Linux ARM chdir */
+    b.eq    syscall_chdir
+    cmp     w7, #19               /* Linux ARM lseek */
+    b.eq    syscall_lseek
+    cmp     w7, #3                /* Linux ARM read */
+    b.eq    syscall_read
+    cmp     w7, #4                /* Linux ARM write */
+    b.eq    syscall_write
+    cmp     w7, #45               /* Linux ARM brk */
+    b.eq    syscall_brk
+    cmp     w7, #2                /* Linux ARM fork */
+    b.eq    syscall_clone
+    cmp     w7, #11               /* Linux ARM execve */
+    b.eq    syscall_execve
+    cmp     w7, #114              /* Linux ARM wait4 */
+    b.eq    syscall_wait4
+    cmp     w7, #1                /* Linux ARM exit */
+    b.eq    syscall_exit
+    cmp     w7, #248              /* Linux ARM exit_group */
+    b.eq    syscall_exit
+    mov     x0, #-38              /* -ENOSYS */
+    b       trap_return
+
+syscall_a32_open:
+    mov     x3, x2                /* mode */
+    mov     x2, x1                /* flags */
+    mov     x1, x0                /* pathname */
+    mov     x0, #-100             /* AT_FDCWD */
+    b       syscall_openat
+
+syscall_a32_unlink:
+    mov     x1, x0
+    mov     x0, #-100             /* AT_FDCWD */
+    mov     x2, #0
+    b       syscall_unlinkat
+
+syscall_a32_access:
+    mov     x2, x1                /* mode */
+    mov     x1, x0                /* pathname */
+    mov     x0, #-100             /* AT_FDCWD */
+    b       syscall_faccessat
 
 syscall_write:
     cmp     x0, #3
@@ -1434,7 +1536,11 @@ launch_shell_process:
     bl      load_elf
     ldr     x9, =USER_ENTRY_SLOT
     str     x0, [x9]
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, launch_shell_process_a32_stack
 
+    /* Linux AArch64 startup stack: 64-bit argc, argv, and envp slots. */
     ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
     mov     x10, #1
     ldr     x11, =SHELL_ARGUMENT_PTR
@@ -1470,17 +1576,57 @@ launch_shell_process:
 2:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
     str     xzr, [x9, #16]
     str     xzr, [x9, #24]
-3:  ldr     x9, =SHELL_PROCESS_ACTIVE
+3:  b       launch_shell_process_activate
+
+    /*
+     * Linux ARM EABI startup stack: 32-bit argc, argv, and envp slots.
+     * Strings retain the same top-page placement used by the AArch64 path.
+     */
+launch_shell_process_a32_stack:
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    mov     w10, #1
+    ldr     x11, =SHELL_ARGUMENT_PTR
+    ldr     x11, [x11]
+    cbz     x11, 1f
+    ldrb    w12, [x11]
+    cbz     w12, 1f
+    mov     w10, #2
+1:  str     w10, [x9]
+    ldr     w10, =(USER_STACK_TOP - 4096 + 0x400)
+    str     w10, [x9, #4]
+    ldr     x0, =SHELL_COMMAND_PTR
+    ldr     x0, [x0]
+    add     x1, x9, #0x400
+    bl      copy_string
+    mov     x10, x1
+    ldr     x11, =SHELL_ARGUMENT_PTR
+    ldr     x11, [x11]
+    cbz     x11, 2f
+    ldrb    w12, [x11]
+    cbz     w12, 2f
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    ldr     x12, =USER_PHYS_OFFSET
+    sub     x12, x10, x12
+    str     w12, [x9, #8]
+    mov     x0, x11
+    mov     x1, x10
+    bl      copy_string
+    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     wzr, [x9, #12]
+    str     wzr, [x9, #16]
+    b       launch_shell_process_activate
+2:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     wzr, [x9, #8]
+    str     wzr, [x9, #12]
+
+launch_shell_process_activate:
+    ldr     x9, =SHELL_PROCESS_ACTIVE
     mov     x10, #1
     str     x10, [x9]
-    ldr     x9, =(USER_STACK_TOP - 4096)
-    msr     sp_el0, x9
     ldr     x9, =USER_ENTRY_SLOT
-    ldr     x9, [x9]
-    msr     elr_el1, x9
-    mov     x9, #0x3c0
-    msr     spsr_el1, x9
-    eret
+    ldr     x0, [x9]
+    ldr     x1, =(USER_STACK_TOP - 4096)
+    b       enter_user
 
 launch_shell_too_big:
     mov     x0, #-7               /* -E2BIG */
@@ -1628,9 +1774,17 @@ load_disk_elf_optional:
     mov     x1, x19
     bl      load_elf
     mov     x19, x0
+    ldr     x9, =PROCESS_ABI_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, 2f
     adrp    x0, disk_elf_message
     add     x0, x0, :lo12:disk_elf_message
     bl      uart_puts
+    b       5f
+2:  adrp    x0, disk_elf32_message
+    add     x0, x0, :lo12:disk_elf32_message
+    bl      uart_puts
+5:
     adrp    x0, disk_brk_message
     add     x0, x0, :lo12:disk_brk_message
     bl      uart_puts
@@ -1825,8 +1979,18 @@ read_bytes:
     ldp     x19, x20, [sp], #32
     ret
 
-/* x0=ELF image, x1=exact bytes; returns validated e_entry. */
+/* x0=ELF image, x1=exact bytes; returns validated e_entry and records ABI. */
 load_elf:
+    cmp     x1, #5
+    b.lo    elf_failure
+    ldrb    w9, [x0, #4]
+    cmp     w9, #2                /* ELFCLASS64 */
+    b.eq    load_elf64
+    cmp     w9, #1                /* ELFCLASS32 */
+    b.eq    load_elf32
+    b       elf_failure
+
+load_elf64:
     sub     sp, sp, #80
     stp     x19, x20, [sp, #0]
     stp     x21, x22, [sp, #16]
@@ -1944,6 +2108,138 @@ load_elf:
     str     x24, [x9]
     ldr     x9, =PROCESS_BRK_MIN
     str     x24, [x9]
+    ldr     x9, =PROCESS_ABI_SLOT
+    str     xzr, [x9]
+    mov     x0, x25
+    ldr     x30, [sp, #64]
+    ldp     x25, x26, [sp, #48]
+    ldp     x23, x24, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp, #0]
+    add     sp, sp, #80
+    ret
+
+load_elf32:
+    sub     sp, sp, #80
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x25, x26, [sp, #48]
+    str     x30, [sp, #64]
+    mov     x19, x0               /* source */
+    mov     x20, x1               /* exact source bytes */
+    cmp     x20, #52
+    b.lo    elf_failure
+    ldr     w9, [x19]
+    ldr     w10, =0x464c457f
+    cmp     w9, w10               /* ELF magic */
+    b.ne    elf_failure
+    ldrh    w9, [x19, #4]
+    cmp     w9, #0x0101           /* ELF32, little-endian */
+    b.ne    elf_failure
+    ldrb    w9, [x19, #6]
+    cmp     w9, #1                /* identification version; OSABI is free */
+    b.ne    elf_failure
+    ldrh    w9, [x19, #16]
+    cmp     w9, #2                /* ET_EXEC */
+    b.ne    elf_failure
+    ldrh    w9, [x19, #18]
+    cmp     w9, #40               /* EM_ARM */
+    b.ne    elf_failure
+    ldr     w25, [x19, #20]
+    cmp     w25, #1
+    b.ne    elf_failure
+    ldrh    w9, [x19, #40]
+    cmp     w9, #52
+    b.ne    elf_failure
+    ldrh    w23, [x19, #42]
+    cmp     w23, #32
+    b.ne    elf_failure
+    ldrh    w22, [x19, #44]
+    cbz     x22, elf_failure
+    cmp     x22, #32
+    b.hi    elf_failure
+    ldr     w9, [x19, #28]        /* e_phoff */
+    mul     x10, x22, x23
+    adds    x10, x9, x10
+    b.cs    elf_failure
+    cmp     x10, x20
+    b.hi    elf_failure
+    add     x21, x19, x9          /* program-header cursor */
+    ldr     w25, [x19, #24]       /* entry */
+    ldr     x24, =USER_VIRT       /* highest loaded virtual address */
+    mov     x26, #0               /* PT_LOAD count */
+
+1:  ldr     w9, [x21]
+    cmp     w9, #1                /* PT_LOAD */
+    b.ne    5f
+    ldr     w10, [x21, #8]        /* p_vaddr */
+    ldr     w15, [x21, #16]       /* p_filesz */
+    ldr     w11, [x21, #20]       /* p_memsz */
+    cmp     x11, x15
+    b.lo    elf_failure
+    ldr     x9, =USER_VIRT
+    cmp     x10, x9
+    b.lo    elf_failure
+    adds    x12, x10, x11         /* virtual segment end */
+    b.cs    elf_failure
+    ldr     x9, =USER_HEAP_TOP
+    cmp     x12, x9
+    b.hi    elf_failure
+    ldr     w14, [x21, #4]        /* p_offset */
+    adds    x16, x14, x15
+    b.cs    elf_failure
+    cmp     x14, x20
+    b.hi    elf_failure
+    sub     x16, x20, x14         /* source bytes available at p_offset */
+    sub     x11, x11, x15         /* BSS bytes after advertised file data */
+    mov     x18, #0               /* missing final file-page bytes */
+    cmp     x15, x16
+    b.ls    6f
+    sub     x18, x15, x16
+    cmp     x18, #4095
+    b.hi    elf_failure
+    mov     x15, x16
+6:
+    add     x17, x19, x14         /* source bytes */
+    ldr     x9, =USER_PHYS_OFFSET
+    add     x13, x10, x9          /* physical destination */
+2:  cbz     x15, 3f
+    ldrb    w9, [x17], #1
+    strb    w9, [x13], #1
+    sub     x15, x15, #1
+    b       2b
+3:  cbz     x18, 7f
+    strb    wzr, [x13], #1
+    sub     x18, x18, #1
+    b       3b
+7:  cbz     x11, 4f
+    strb    wzr, [x13], #1
+    sub     x11, x11, #1
+    b       7b
+4:  cmp     x12, x24
+    csel    x24, x12, x24, hi
+    add     x26, x26, #1
+5:  add     x21, x21, x23
+    subs    x22, x22, #1
+    b.ne    1b
+
+    cbz     x26, elf_failure
+    ldr     x9, =USER_VIRT
+    cmp     x25, x9
+    b.lo    elf_failure
+    ldr     x9, =USER_HEAP_TOP
+    cmp     x25, x9
+    b.hs    elf_failure
+    add     x24, x24, #4095
+    and     x24, x24, #0xfffffffffffff000
+    ldr     x9, =PROCESS_BRK_SLOT
+    str     x24, [x9]
+    ldr     x9, =PROCESS_BRK_MIN
+    str     x24, [x9]
+    ldr     x9, =PROCESS_ABI_SLOT
+    mov     x10, #1
+    str     x10, [x9]
     mov     x0, x25
     ldr     x30, [sp, #64]
     ldp     x25, x26, [sp, #48]
@@ -2037,9 +2333,11 @@ trap_far_message:
 disk_failure_message:
     .asciz  "builder-hex0-arm64 stage2 disk request failed\n"
 elf_failure_message:
-    .asciz  "builder-hex0-arm64 stage2 invalid ELF64 image\n"
+    .asciz  "builder-hex0-arm64 stage2 invalid ELF image\n"
 disk_elf_message:
     .asciz  "builder-hex0-arm64 stage2 disk ELF64 loaded\n"
+disk_elf32_message:
+    .asciz  "builder-hex0-arm64 stage2 disk ELF32 loaded\n"
 disk_brk_message:
     .asciz  "builder-hex0-arm64 stage2 initial brk: 0x"
 shell_failure_message:
