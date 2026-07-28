@@ -186,6 +186,53 @@ _start:
     mov     x8, #64
     svc     #0
 
+    adr     x0, invalid_exec_path
+    mov     x1, #0
+    mov     x2, #0
+    mov     x8, #221             /* execve */
+    svc     #0
+    mov     x9, #-8              /* -ENOEXEC */
+    cmp     x0, x9
+    b.ne    failure
+
+    /*
+     * The child runs synchronously while the parent image is snapshotted.
+     * execve replaces it with the embedded ELF, whose status proves argc and
+     * argv survived the image replacement.
+     */
+    mov     x0, #17              /* SIGCHLD */
+    mov     x1, #0
+    mov     x2, #0
+    mov     x3, #0
+    mov     x4, #0
+    mov     x8, #220             /* clone */
+    svc     #0
+    cbz     x0, clone_child
+    cmp     x0, #1
+    b.ne    failure
+    mov     x0, #1
+    adrp    x1, child_status
+    add     x1, x1, :lo12:child_status
+    mov     x2, #0
+    mov     x3, #0
+    mov     x8, #260             /* wait4 */
+    svc     #0
+    cmp     x0, #1
+    b.ne    failure
+    adrp    x9, child_status
+    add     x9, x9, :lo12:child_status
+    ldr     w10, [x9]
+    mov     w9, #0x700
+    cmp     w10, w9
+    b.ne    failure
+
+    mov     x0, #1
+    adr     x1, process_message
+    adr     x2, process_message_end
+    sub     x2, x2, x1
+    mov     x8, #64
+    svc     #0
+
     mov     x0, #1
     adr     x1, success_message
     adr     x2, success_message_end
@@ -195,6 +242,20 @@ _start:
     mov     x0, #0
     mov     x8, #93
     svc     #0
+
+clone_child:
+    sub     sp, sp, #32
+    adr     x9, exec_path
+    str     x9, [sp]
+    adr     x9, child_argument
+    str     x9, [sp, #8]
+    str     xzr, [sp, #16]
+    adr     x0, exec_path
+    mov     x1, sp
+    mov     x2, #0
+    mov     x8, #221             /* execve */
+    svc     #0
+    b       failure
 
 /* x0/x1 buffers, x2 bytes; returns zero when equal. */
 compare_bytes:
@@ -234,6 +295,12 @@ create_path:
     .asciz  "../work/./file"
 relative_path:
     .asciz  "./file"
+exec_path:
+    .asciz  "/exec-target"
+invalid_exec_path:
+    .asciz  "/input"
+child_argument:
+    .asciz  "child"
 long_path:
     .ascii  "/"
     .rept   127
@@ -249,11 +316,16 @@ output_data_end:
 path_message:
     .ascii  "builder-hex0-arm64 path syscalls passed\n"
 path_message_end:
+process_message:
+    .ascii  "builder-hex0-arm64 process syscalls passed\n"
+process_message_end:
 
     .section .bss
     .balign 4096
 bss_probe:
     .skip   4096
+child_status:
+    .skip   4
 file_buffer:
     .skip   64
 bss_probe_end:

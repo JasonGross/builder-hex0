@@ -16,6 +16,13 @@
     .equ PROCESS_BRK_SLOT,   0x41002008
     .equ PROCESS_BRK_MIN,    0x41002010
     .equ FILE_COUNT_SLOT,    0x41002018
+    .equ CHILD_PROCESS_SLOT, 0x41002020
+    .equ CHILD_EXIT_STATUS,  0x41002028
+    .equ PARENT_ELR_SLOT,    0x41002030
+    .equ PARENT_SP_SLOT,     0x41002038
+    .equ PARENT_BRK_SLOT,    0x41002040
+    .equ PARENT_BRK_MIN_SLOT, 0x41002048
+    .equ PARENT_PROCESS_WORDS, 0x41002050
     .equ VIRTQ_DESC,         0x41200000
     .equ VIRTQ_AVAIL,        0x41201000
     .equ VIRTQ_USED,         0x41202000
@@ -39,10 +46,28 @@
     .equ USER_HEAP_TOP,      0x02000000
     .equ USER_STACK_PHYS,    0x47e00000
     .equ USER_STACK_TOP,     0x08000000
+    .equ USER_STACK_SIZE,    0x00200000
     .equ KERNEL_STACK_TOP,   0x47dff000
     .equ ELF_SOURCE,         0x43000000
     .equ ELF_SOURCE_LIMIT,   0x44000000
+    .equ PARENT_PROCESS,     0x44000000
+    .equ PARENT_STACK,       0x45a00000
+    .equ PARENT_FDS,         0x45c00000
+    .equ PARENT_FRAME,       0x45c01000
+    .equ EXEC_ARGV,          0x45c02000
+    .equ EXEC_STRINGS,       0x45c03000
+    .equ PARENT_CWD,         0x45c04000
     .equ DISK_HEADER_MAGIC,  0x3245415244485842 /* "BXHDRAE2" */
+
+    .if PARENT_PROCESS + (USER_HEAP_TOP - USER_VIRT) > PARENT_STACK
+    .error "parent process snapshot overlaps parent stack"
+    .endif
+    .if PARENT_STACK + USER_STACK_SIZE > PARENT_FDS
+    .error "parent stack snapshot overlaps process metadata"
+    .endif
+    .if EXEC_STRINGS + 0xc00 > PARENT_CWD
+    .error "exec string scratch overlaps parent cwd"
+    .endif
 
 _start:
     mrs     x9, CurrentEL
@@ -243,6 +268,12 @@ lower_a64_sync:
     b.eq    syscall_write
     cmp     x8, #214              /* Linux AArch64 brk */
     b.eq    syscall_brk
+    cmp     x8, #220              /* Linux AArch64 clone */
+    b.eq    syscall_clone
+    cmp     x8, #221              /* Linux AArch64 execve */
+    b.eq    syscall_execve
+    cmp     x8, #260              /* Linux AArch64 wait4 */
+    b.eq    syscall_wait4
     cmp     x8, #93               /* Linux AArch64 exit */
     b.eq    syscall_exit
     cmp     x8, #94               /* Linux AArch64 exit_group */
@@ -500,9 +531,208 @@ syscall_brk:
 3:  mov     x0, x10               /* raw brk returns the old break on failure */
 4:  b       trap_return
 
+syscall_clone:
+    ldr     x9, =CHILD_PROCESS_SLOT
+    ldr     x10, [x9]
+    cbnz    x10, syscall_try_again
+
+    /* Preserve the parent trap frame and process control values. */
+    mov     x0, sp
+    ldr     x1, =PARENT_FRAME
+    mov     x2, #32
+    bl      copy_words
+    mrs     x9, elr_el1
+    ldr     x10, =PARENT_ELR_SLOT
+    str     x9, [x10]
+    mrs     x9, sp_el0
+    ldr     x10, =PARENT_SP_SLOT
+    str     x9, [x10]
+    ldr     x9, =PROCESS_BRK_SLOT
+    ldr     x9, [x9]
+    ldr     x10, =PARENT_BRK_SLOT
+    str     x9, [x10]
+    ldr     x9, =PROCESS_BRK_MIN
+    ldr     x9, [x9]
+    ldr     x10, =PARENT_BRK_MIN_SLOT
+    str     x9, [x10]
+
+    /* Snapshot used process memory, the full user stack, fds, and cwd. */
+    ldr     x9, =PROCESS_BRK_SLOT
+    ldr     x2, [x9]
+    ldr     x9, =USER_VIRT
+    sub     x2, x2, x9
+    add     x2, x2, #7
+    lsr     x2, x2, #3
+    ldr     x9, =PARENT_PROCESS_WORDS
+    str     x2, [x9]
+    ldr     x0, =USER_PHYS
+    ldr     x1, =PARENT_PROCESS
+    bl      copy_words
+    ldr     x0, =USER_STACK_PHYS
+    ldr     x1, =PARENT_STACK
+    ldr     x2, =(USER_STACK_SIZE / 8)
+    bl      copy_words
+    ldr     x0, =FD_TABLE
+    ldr     x1, =PARENT_FDS
+    mov     x2, #96               /* 32 records * 24 bytes / 8 */
+    bl      copy_words
+    ldr     x0, =CWD_BUFFER
+    ldr     x1, =PARENT_CWD
+    mov     x2, #16
+    bl      copy_words
+
+    ldr     x9, =CHILD_PROCESS_SLOT
+    mov     x10, #1
+    str     x10, [x9]
+    mov     x0, #0                /* child return */
+    b       trap_return
+
+syscall_execve:
+    mov     x19, x1               /* argv in the old image */
+    ldr     x1, =PATH_BUFFER
+    bl      normalize_path
+    cbz     x0, syscall_name_too_long
+    bl      find_file
+    cbz     x0, syscall_no_entry
+    ldr     x20, [x0, #8]         /* ELF image */
+    ldr     x21, [x0, #16]        /* exact image bytes */
+    cmp     x21, #4
+    b.lo    syscall_exec_format
+    ldr     w9, [x20]
+    ldr     w10, =0x464c457f
+    cmp     w9, w10
+    b.ne    syscall_exec_format
+
+    /* Copy argv out before PT_LOAD overwrites the old process image. */
+    ldr     x9, =EXEC_ARGV
+    ldr     x10, =EXEC_STRINGS
+    mov     x22, #0               /* argc */
+1:  cbz     x19, 4f
+    ldr     x11, [x19], #8
+    cbz     x11, 4f
+    cmp     x22, #31
+    b.hs    syscall_arg_too_big
+    str     x10, [x9], #8
+2:  ldr     x12, =(EXEC_STRINGS + 0xc00)
+    cmp     x10, x12
+    b.hs    syscall_arg_too_big
+    ldrb    w12, [x11], #1
+    strb    w12, [x10], #1
+    cbnz    w12, 2b
+    add     x22, x22, #1
+    b       1b
+
+4:  mov     x0, x20
+    mov     x1, x21
+    bl      load_elf
+    mov     x23, x0               /* new entry */
+
+    /* Construct argc/argv/envp in the top page of the user stack. */
+    ldr     x24, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    str     x22, [x24]
+    add     x25, x24, #8          /* user argv slots */
+    add     x26, x24, #0x400      /* user strings */
+    ldr     x9, =EXEC_ARGV
+    mov     x10, #0
+5:  cmp     x10, x22
+    b.hs    6f
+    ldr     x11, =USER_PHYS_OFFSET
+    sub     x11, x26, x11
+    str     x11, [x25], #8
+    ldr     x11, [x9], #8
+7:  ldrb    w12, [x11], #1
+    strb    w12, [x26], #1
+    cbnz    w12, 7b
+    add     x10, x10, #1
+    b       5b
+6:  str     xzr, [x25], #8        /* argv[argc] */
+    str     xzr, [x25]            /* envp[0] */
+    ldr     x9, =(USER_STACK_TOP - 4096)
+    msr     sp_el0, x9
+    msr     elr_el1, x23
+
+    /* Successful exec starts with a clean register frame. */
+    mov     x9, sp
+    add     x10, sp, #256
+8:  str     xzr, [x9], #8
+    cmp     x9, x10
+    b.lo    8b
+    mov     x0, #0
+    b       trap_return
+
+syscall_exec_format:
+    mov     x0, #-8               /* -ENOEXEC */
+    b       trap_return
+
+syscall_arg_too_big:
+    mov     x0, #-7               /* -E2BIG */
+    b       trap_return
+
+syscall_wait4:
+    ldr     x9, =CHILD_PROCESS_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, syscall_try_again
+    cbz     x1, 1f
+    ldr     x9, =CHILD_EXIT_STATUS
+    ldr     x9, [x9]
+    lsl     x9, x9, #8
+    str     w9, [x1]
+1:  mov     x0, #1
+    b       trap_return
+
+syscall_try_again:
+    mov     x0, #-11              /* -EAGAIN */
+    b       trap_return
+
 syscall_exit:
+    ldr     x9, =CHILD_PROCESS_SLOT
+    ldr     x9, [x9]
+    cbnz    x9, restore_parent
     cbnz    x0, trap_failure
     b       poweroff
+
+restore_parent:
+    ldr     x9, =CHILD_EXIT_STATUS
+    str     x0, [x9]
+    ldr     x9, =PARENT_PROCESS_WORDS
+    ldr     x2, [x9]
+    ldr     x0, =PARENT_PROCESS
+    ldr     x1, =USER_PHYS
+    bl      copy_words
+    ldr     x0, =PARENT_STACK
+    ldr     x1, =USER_STACK_PHYS
+    ldr     x2, =(USER_STACK_SIZE / 8)
+    bl      copy_words
+    ldr     x0, =PARENT_FDS
+    ldr     x1, =FD_TABLE
+    mov     x2, #96
+    bl      copy_words
+    ldr     x0, =PARENT_CWD
+    ldr     x1, =CWD_BUFFER
+    mov     x2, #16
+    bl      copy_words
+    ldr     x9, =PARENT_BRK_SLOT
+    ldr     x9, [x9]
+    ldr     x10, =PROCESS_BRK_SLOT
+    str     x9, [x10]
+    ldr     x9, =PARENT_BRK_MIN_SLOT
+    ldr     x9, [x9]
+    ldr     x10, =PROCESS_BRK_MIN
+    str     x9, [x10]
+    ldr     x9, =PARENT_ELR_SLOT
+    ldr     x9, [x9]
+    msr     elr_el1, x9
+    ldr     x9, =PARENT_SP_SLOT
+    ldr     x9, [x9]
+    msr     sp_el0, x9
+    ldr     x9, =CHILD_PROCESS_SLOT
+    str     xzr, [x9]
+    ldr     x0, =PARENT_FRAME
+    mov     x1, sp
+    mov     x2, #32
+    bl      copy_words
+    mov     x0, #1                /* parent clone return */
+    b       trap_return
 
 trap_return:
     str     x0, [sp]
@@ -570,13 +800,29 @@ init_filesystem:
     ldrb    w15, [x12], #1
     strb    w15, [x14], #1
     b       3b
-4:  ldr     x9, =FILE_COUNT_SLOT
-    mov     x10, #1
+4:  ldr     x9, =(FILE_TABLE + FILE_RECORD_SIZE)
+    adrp    x10, exec_target_name
+    add     x10, x10, :lo12:exec_target_name
+    str     x10, [x9]
+    adrp    x10, builtin_exec_elf
+    add     x10, x10, :lo12:builtin_exec_elf
+    str     x10, [x9, #8]
+    adrp    x11, builtin_exec_elf_end
+    add     x11, x11, :lo12:builtin_exec_elf_end
+    sub     x11, x11, x10
+    str     x11, [x9, #16]
+    str     x11, [x9, #24]
+
+    ldr     x9, =FILE_COUNT_SLOT
+    mov     x10, #2
     str     x10, [x9]
     ldr     x9, =CWD_BUFFER
     mov     w10, #'/'
     strb    w10, [x9]
     strb    wzr, [x9, #1]
+    ldr     x9, =CHILD_PROCESS_SLOT
+    str     xzr, [x9]
+    str     xzr, [x9, #8]
     ret
 
 /* x0=source and x1=destination NUL-terminated strings. */
@@ -585,6 +831,15 @@ copy_string:
     strb    w9, [x1], #1
     cbnz    w9, 1b
     ret
+
+/* x0=source, x1=destination, and x2=64-bit word count. */
+copy_words:
+1:  cbz     x2, 2f
+    ldr     x9, [x0], #8
+    str     x9, [x1], #8
+    sub     x2, x2, #1
+    b       1b
+2:  ret
 
 /*
  * x0=input path and x1=destination. Return a canonical absolute path, or
@@ -1136,6 +1391,56 @@ disk_brk_message:
     .asciz  "builder-hex0-arm64 stage2 initial brk: 0x"
 input_name:
     .asciz  "/input"
+exec_target_name:
+    .asciz  "/exec-target"
 input_data:
     .ascii  "builder memory file input\n"
 input_data_end:
+
+    .balign 8
+builtin_exec_elf:
+    .byte   0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0
+    .byte   0, 0, 0, 0, 0, 0, 0, 0
+    .hword  2                      /* ET_EXEC */
+    .hword  183                    /* EM_AARCH64 */
+    .word   1
+    .dword  USER_VIRT + (builtin_exec_entry - builtin_exec_elf)
+    .dword  64                     /* e_phoff */
+    .dword  0
+    .word   0
+    .hword  64
+    .hword  56
+    .hword  1
+    .hword  0
+    .hword  0
+    .hword  0
+    .word   1                      /* PT_LOAD */
+    .word   7                      /* PF_R | PF_W | PF_X */
+    .dword  0
+    .dword  USER_VIRT
+    .dword  USER_VIRT
+    .dword  builtin_exec_elf_end - builtin_exec_elf
+    .dword  builtin_exec_elf_end - builtin_exec_elf
+    .dword  4096
+builtin_exec_entry:
+    ldr     x9, [sp]
+    cmp     x9, #2
+    b.ne    builtin_exec_bad
+    ldr     x9, [sp, #8]
+    ldrb    w9, [x9]
+    cmp     w9, #47               /* '/' */
+    b.ne    builtin_exec_bad
+    ldr     x9, [sp, #16]
+    ldrb    w9, [x9]
+    cmp     w9, #99               /* 'c' */
+    b.ne    builtin_exec_bad
+    ldr     x9, [sp, #24]
+    cbnz    x9, builtin_exec_bad
+    mov     x0, #7
+    b       builtin_exec_exit
+builtin_exec_bad:
+    mov     x0, #9
+builtin_exec_exit:
+    mov     x8, #93
+    svc     #0
+builtin_exec_elf_end:

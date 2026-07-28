@@ -80,10 +80,10 @@ and validates an ELF64/AArch64 `ET_EXEC`, copies every `PT_LOAD` segment,
 clears BSS, and initializes the process break. The lower-EL synchronous vector
 preserves all 31 general registers and implements raw Linux AArch64
 `unlinkat`/`faccessat`/`chdir`/`fchmodat`/`openat`/`close`/`lseek`/`read`/
-`write`/`brk`/`exit`/`exit_group` calls through `svc`. A fixed-size bootstrap
-filesystem supplies `/input`, canonicalizes absolute and cwd-relative paths,
-and supports file creation, truncation, lookup, unlink, rewinding, and bounded
-reads and writes.
+`write`/`brk`/`clone`/`execve`/`wait4`/`exit`/`exit_group` calls through `svc`.
+A fixed-size bootstrap filesystem supplies `/input`, canonicalizes absolute
+and cwd-relative paths, and supports file creation, truncation, lookup,
+unlink, rewinding, and bounded reads and writes.
 
 | Offset | Value |
 | ---: | --- |
@@ -91,9 +91,9 @@ reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 7,862-byte oracle image exactly; the current
+The checked hex0 reconstructs the 9,040-byte oracle image exactly; the current
 SHA-256 is
-`654b96a7dfcd1b557c142199176936ae03595400b66dad7a96ca9966d6a28715`.
+`ad2245d7e9671c0c060e8d8f15b73f820b88d4ccfbf7db4d2229cf9ebb710334`.
 Run all three paths with:
 
 ```sh
@@ -109,8 +109,11 @@ writes it, seeks to the beginning, reads it back, and closes both descriptors.
 It also canonicalizes repeated separators and dot components, changes its
 virtual cwd, creates and finds a relative path, checks access, applies the
 bootstrap chmod no-op, unlinks it, and verifies that a later lookup returns
-`ENOENT`. Process sequencing and the remaining stage0-posix syscall surface
-are the next stage-2 increments.
+`ENOENT`. Finally, it rejects a non-ELF exec, snapshots a parent with `clone`,
+replaces the child through `execve`, restores the parent on child exit, and
+checks the child's argv-dependent status through `wait4`. The builder shell,
+canonical stage0 inputs, and any syscall gaps they expose are the next
+increments.
 
 ## Design and bug log
 
@@ -167,3 +170,12 @@ are the next stage-2 increments.
   descriptors remain valid. The first lookup loop dereferenced that zero name
   pointer; it now skips tombstones, and the fixture performs a lookup after
   unlink to cover the failure mode.
+- Process sequencing deliberately permits one synchronous child. `clone`
+  saves the parent trap frame, used image bytes, full 2 MiB stack, descriptor
+  table, cwd, and break state in fixed EL1-only regions. Child exit restores
+  that state before returning `1` from the parent's original clone call.
+- `execve` must preserve argv before loading `PT_LOAD` segments over the old
+  process. It copies at most 31 arguments and 3 KiB of strings to EL1-only
+  scratch, rebuilds the Linux AArch64 startup stack, and clears the new
+  register frame. An embedded ELF validates argc, both arguments, and the
+  null terminator before exiting with the status checked by `wait4`.
