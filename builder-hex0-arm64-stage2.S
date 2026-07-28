@@ -34,6 +34,10 @@
     .equ SHELL_COMMAND_PTR,  0x40202098
     .equ SHELL_ARGUMENT_PTR, 0x402020a0
     .equ PROCESS_ABI_SLOT,   0x402020a8 /* 0=AArch64, 1=AArch32 */
+    .equ SHELL_ARG_CURSOR,   0x402020b0
+    .equ SHELL_STRING_DEST,  0x402020b8
+    .equ SHELL_ARGV_DEST,    0x402020c0
+    .equ SHELL_ARGC_SLOT,    0x402020c8
     .equ VIRTQ_DESC,         0x40400000
     .equ VIRTQ_AVAIL,        0x40401000
     .equ VIRTQ_USED,         0x40402000
@@ -56,6 +60,9 @@
     .equ USER_VIRT,          0x00600000
     .equ USER_PHYS_OFFSET,   0x40000000
     .equ USER_HEAP_TOP,      0x02600000
+    .equ A32_USER_ENTRY_MIN, 0x00010000
+    .equ A32_USER_HEAP_TOP,  0x02000000
+    .equ A32_USER_PHYS_OFFSET, 0x40600000
     .equ USER_STACK_PHYS,    0x47800000
     .equ USER_STACK_TOP,     0x08000000
     .equ USER_STACK_SIZE,    0x00800000
@@ -235,6 +242,49 @@ enter_user:
     mov     x9, #0x1d0            /* AArch32 user mode, LE, A/I/F masked */
     msr     spsr_el1, x9
     eret
+
+/* Repoint the 32 MiB process arena without disturbing stack/device entries. */
+map_user_a64:
+    ldr     x9, =LOW_PAGE_TABLE
+    add     x10, x9, #(19 * 8)
+1:  str     xzr, [x9], #8
+    cmp     x9, x10
+    b.lo    1b
+    ldr     x9, =(LOW_PAGE_TABLE + 24)
+    ldr     x10, =(USER_PHYS | (1 << 53) | 0x745)
+    ldr     x11, =(USER_PHYS + 0x02000000)
+    ldr     x12, =0x00200000
+    ldr     x13, =USER_PHYS
+2:  str     x10, [x9], #8
+    add     x10, x10, x12
+    add     x13, x13, x12
+    cmp     x13, x11
+    b.lo    2b
+    b       flush_user_map
+
+map_user_a32:
+    ldr     x9, =LOW_PAGE_TABLE
+    add     x10, x9, #(19 * 8)
+1:  str     xzr, [x9], #8
+    cmp     x9, x10
+    b.lo    1b
+    ldr     x9, =LOW_PAGE_TABLE
+    ldr     x10, =(USER_PHYS | (1 << 53) | 0x745)
+    ldr     x11, =(USER_PHYS + 0x02000000)
+    ldr     x12, =0x00200000
+    ldr     x13, =USER_PHYS
+2:  str     x10, [x9], #8
+    add     x10, x10, x12
+    add     x13, x13, x12
+    cmp     x13, x11
+    b.lo    2b
+
+flush_user_map:
+    dsb     ishst
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    ret
 
     .align 11
 vector_table:
@@ -651,12 +701,24 @@ syscall_brk:
     ldr     x11, [x11]
     cmp     x0, x11
     b.lo    3f
-    ldr     x11, =USER_HEAP_TOP
+    ldr     x11, =PROCESS_ABI_SLOT
+    ldr     x11, [x11]
+    cbz     x11, 5f
+    ldr     x11, =A32_USER_HEAP_TOP
+    b       6f
+5:  ldr     x11, =USER_HEAP_TOP
+6:
     cmp     x0, x11
     b.hi    3f
     cmp     x0, x10
     b.ls    2f
-    ldr     x11, =USER_PHYS_OFFSET
+    ldr     x11, =PROCESS_ABI_SLOT
+    ldr     x11, [x11]
+    cbz     x11, 5f
+    ldr     x11, =A32_USER_PHYS_OFFSET
+    b       6f
+5:  ldr     x11, =USER_PHYS_OFFSET
+6:
     add     x11, x10, x11
     sub     x12, x0, x10
 1:  strb    wzr, [x11], #1
@@ -1507,7 +1569,7 @@ shell_maybe_flush:
 2:  ldr     x30, [sp], #16
     ret
 
-/* x0=file record, x1=argv[0], x2=optional argv[1]. */
+/* x0=file record, x1=argv[0], x2=remaining command line. */
 launch_shell_process:
     mov     x9, x1
     mov     x10, #0
@@ -1542,41 +1604,61 @@ launch_shell_process:
 
     /* Linux AArch64 startup stack: 64-bit argc, argv, and envp slots. */
     ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    mov     x10, #1
-    ldr     x11, =SHELL_ARGUMENT_PTR
-    ldr     x11, [x11]
-    cbz     x11, 1f
-    ldrb    w12, [x11]
-    cbz     w12, 1f
-    mov     x10, #2
-1:  str     x10, [x9]
     ldr     x10, =(USER_STACK_TOP - 4096 + 0x400)
     str     x10, [x9, #8]
     ldr     x0, =SHELL_COMMAND_PTR
     ldr     x0, [x0]
     add     x1, x9, #0x400
     bl      copy_string
-    mov     x10, x1
-    ldr     x11, =SHELL_ARGUMENT_PTR
-    ldr     x11, [x11]
-    cbz     x11, 2f
-    ldrb    w12, [x11]
-    cbz     w12, 2f
-    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    ldr     x12, =USER_PHYS_OFFSET
-    sub     x12, x10, x12
-    str     x12, [x9, #16]
-    mov     x0, x11
-    mov     x1, x10
+    ldr     x9, =SHELL_STRING_DEST
+    str     x1, [x9]
+    ldr     x9, =SHELL_ARGUMENT_PTR
+    ldr     x10, [x9]
+    ldr     x9, =SHELL_ARG_CURSOR
+    str     x10, [x9]
+    ldr     x9, =SHELL_ARGV_DEST
+    ldr     x10, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 16)
+    str     x10, [x9]
+    ldr     x9, =SHELL_ARGC_SLOT
+    mov     x10, #1
+    str     x10, [x9]
+
+1:  ldr     x9, =SHELL_ARG_CURSOR
+    ldr     x0, [x9]
+    cbz     x0, 3f
+    bl      next_token
+    ldr     x9, =SHELL_ARG_CURSOR
+    str     x1, [x9]
+    ldrb    w9, [x0]
+    cbz     w9, 3f
+    ldr     x9, =SHELL_ARGC_SLOT
+    ldr     x10, [x9]
+    cmp     x10, #31
+    b.hs    launch_shell_too_big
+    add     x10, x10, #1
+    str     x10, [x9]
+    ldr     x9, =SHELL_STRING_DEST
+    ldr     x1, [x9]
+    ldr     x10, =USER_PHYS_OFFSET
+    sub     x10, x1, x10
+    ldr     x11, =SHELL_ARGV_DEST
+    ldr     x12, [x11]
+    str     x10, [x12], #8
+    str     x12, [x11]
     bl      copy_string
-    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    str     xzr, [x9, #24]
-    str     xzr, [x9, #32]
-    b       3f
-2:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    str     xzr, [x9, #16]
-    str     xzr, [x9, #24]
-3:  b       launch_shell_process_activate
+    ldr     x9, =SHELL_STRING_DEST
+    str     x1, [x9]
+    b       1b
+
+3:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    ldr     x10, =SHELL_ARGC_SLOT
+    ldr     x10, [x10]
+    str     x10, [x9]
+    ldr     x11, =SHELL_ARGV_DEST
+    ldr     x11, [x11]
+    str     xzr, [x11], #8
+    str     xzr, [x11]
+    b       launch_shell_process_activate
 
     /*
      * Linux ARM EABI startup stack: 32-bit argc, argv, and envp slots.
@@ -1584,40 +1666,60 @@ launch_shell_process:
      */
 launch_shell_process_a32_stack:
     ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    mov     w10, #1
-    ldr     x11, =SHELL_ARGUMENT_PTR
-    ldr     x11, [x11]
-    cbz     x11, 1f
-    ldrb    w12, [x11]
-    cbz     w12, 1f
-    mov     w10, #2
-1:  str     w10, [x9]
     ldr     w10, =(USER_STACK_TOP - 4096 + 0x400)
     str     w10, [x9, #4]
     ldr     x0, =SHELL_COMMAND_PTR
     ldr     x0, [x0]
     add     x1, x9, #0x400
     bl      copy_string
-    mov     x10, x1
-    ldr     x11, =SHELL_ARGUMENT_PTR
-    ldr     x11, [x11]
-    cbz     x11, 2f
-    ldrb    w12, [x11]
-    cbz     w12, 2f
-    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    ldr     x12, =USER_PHYS_OFFSET
-    sub     x12, x10, x12
-    str     w12, [x9, #8]
-    mov     x0, x11
-    mov     x1, x10
+    ldr     x9, =SHELL_STRING_DEST
+    str     x1, [x9]
+    ldr     x9, =SHELL_ARGUMENT_PTR
+    ldr     x10, [x9]
+    ldr     x9, =SHELL_ARG_CURSOR
+    str     x10, [x9]
+    ldr     x9, =SHELL_ARGV_DEST
+    ldr     x10, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096 + 8)
+    str     x10, [x9]
+    ldr     x9, =SHELL_ARGC_SLOT
+    mov     x10, #1
+    str     x10, [x9]
+
+1:  ldr     x9, =SHELL_ARG_CURSOR
+    ldr     x0, [x9]
+    cbz     x0, 3f
+    bl      next_token
+    ldr     x9, =SHELL_ARG_CURSOR
+    str     x1, [x9]
+    ldrb    w9, [x0]
+    cbz     w9, 3f
+    ldr     x9, =SHELL_ARGC_SLOT
+    ldr     x10, [x9]
+    cmp     x10, #31
+    b.hs    launch_shell_too_big
+    add     x10, x10, #1
+    str     x10, [x9]
+    ldr     x9, =SHELL_STRING_DEST
+    ldr     x1, [x9]
+    ldr     x10, =USER_PHYS_OFFSET
+    sub     x10, x1, x10
+    ldr     x11, =SHELL_ARGV_DEST
+    ldr     x12, [x11]
+    str     w10, [x12], #4
+    str     x12, [x11]
     bl      copy_string
-    ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    str     wzr, [x9, #12]
-    str     wzr, [x9, #16]
-    b       launch_shell_process_activate
-2:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
-    str     wzr, [x9, #8]
-    str     wzr, [x9, #12]
+    ldr     x9, =SHELL_STRING_DEST
+    str     x1, [x9]
+    b       1b
+
+3:  ldr     x9, =(USER_STACK_PHYS + USER_STACK_SIZE - 4096)
+    ldr     x10, =SHELL_ARGC_SLOT
+    ldr     x10, [x10]
+    str     w10, [x9]
+    ldr     x11, =SHELL_ARGV_DEST
+    ldr     x11, [x11]
+    str     wzr, [x11], #4
+    str     wzr, [x11]
 
 launch_shell_process_activate:
     ldr     x9, =SHELL_PROCESS_ACTIVE
@@ -1676,9 +1778,7 @@ internal_shell:
     bl      find_file
     cbz     x0, shell_error
     mov     x21, x0
-    mov     x0, x20
-    bl      next_token
-    mov     x2, x0
+    mov     x2, x20
     mov     x1, x19
     mov     x0, x21
     bl      launch_shell_process
@@ -2040,6 +2140,7 @@ load_elf64:
     ldr     x25, [x19, #24]       /* entry */
     ldr     x24, =USER_VIRT       /* highest loaded virtual address */
     mov     x26, #0               /* PT_LOAD count */
+    bl      map_user_a64
 
 1:  ldr     w9, [x21]
     cmp     w9, #1                /* PT_LOAD */
@@ -2167,8 +2268,9 @@ load_elf32:
     b.hi    elf_failure
     add     x21, x19, x9          /* program-header cursor */
     ldr     w25, [x19, #24]       /* entry */
-    ldr     x24, =USER_VIRT       /* highest loaded virtual address */
+    ldr     x24, =A32_USER_ENTRY_MIN /* highest loaded virtual address */
     mov     x26, #0               /* PT_LOAD count */
+    bl      map_user_a32
 
 1:  ldr     w9, [x21]
     cmp     w9, #1                /* PT_LOAD */
@@ -2178,12 +2280,12 @@ load_elf32:
     ldr     w11, [x21, #20]       /* p_memsz */
     cmp     x11, x15
     b.lo    elf_failure
-    ldr     x9, =USER_VIRT
+    ldr     x9, =A32_USER_ENTRY_MIN
     cmp     x10, x9
     b.lo    elf_failure
     adds    x12, x10, x11         /* virtual segment end */
     b.cs    elf_failure
-    ldr     x9, =USER_HEAP_TOP
+    ldr     x9, =A32_USER_HEAP_TOP
     cmp     x12, x9
     b.hi    elf_failure
     ldr     w14, [x21, #4]        /* p_offset */
@@ -2202,7 +2304,7 @@ load_elf32:
     mov     x15, x16
 6:
     add     x17, x19, x14         /* source bytes */
-    ldr     x9, =USER_PHYS_OFFSET
+    ldr     x9, =A32_USER_PHYS_OFFSET
     add     x13, x10, x9          /* physical destination */
 2:  cbz     x15, 3f
     ldrb    w9, [x17], #1
@@ -2225,10 +2327,10 @@ load_elf32:
     b.ne    1b
 
     cbz     x26, elf_failure
-    ldr     x9, =USER_VIRT
+    ldr     x9, =A32_USER_ENTRY_MIN
     cmp     x25, x9
     b.lo    elf_failure
-    ldr     x9, =USER_HEAP_TOP
+    ldr     x9, =A32_USER_HEAP_TOP
     cmp     x25, x9
     b.hs    elf_failure
     add     x24, x24, #4095

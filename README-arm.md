@@ -95,9 +95,9 @@ unlink, rewinding, and bounded reads and writes.
 | `0x08` | first ELF sector |
 | `0x10` | exact ELF byte count |
 
-The checked hex0 reconstructs the 12,536-byte oracle image exactly; the current
+The checked hex0 reconstructs the 12,784-byte oracle image exactly; the current
 SHA-256 is
-`9b4b089dc37588324695e026fd7230352d6b0f598d4de30946332c623fceeb48`.
+`3ef9f600f05fb5d7f0ba656b8fc3ec33a3f758b294450cf8ed489606cc2d43d8`.
 Run the covered paths with:
 
 ```sh
@@ -105,6 +105,7 @@ make test-arm64-stage2
 make test-arm64-stage2-aarch32
 make test-arm64-stage2-shell
 STAGE0_DIR=/path/to/stage0 make test-arm64-stage2-chain
+STAGE0_DIR=/path/to/completed/arm-pivot make test-arm64-stage2-pivot
 ```
 
 The gates run the built-in fixture and disk ELFs over legacy and modern
@@ -130,9 +131,10 @@ The internal shell uses a separate sector-zero contract:
 | `0x10` | exact script byte count |
 
 It streams `src N PATH` payloads without loading the script into RAM, compiles
-`hex0 INPUT OUTPUT`, launches one-argument AArch64 ELF commands at EL0, delays
-an `f` request until the next external command, and writes the newest
-`/dev/hda` at `halt`. The focused gate streams a 66 KiB ELF, executes it,
+`hex0 INPUT OUTPUT`, launches AArch64 or AArch32 ELF commands with up to 31
+arguments, delays an `f` request until the next external command, and writes
+the newest `/dev/hda` at `halt`. It emits LP64 or ILP32 startup pointers to
+match the loaded ELF. The focused gate streams a 66 KiB ELF, executes it,
 compiles a mixed-case/commented hex0 fixture, flushes five exact bytes to
 sector zero, and checks both virtio transports. Running the canonical
 AArch64 stage0 inputs through M2-Planet is the acceptance boundary for
@@ -147,8 +149,13 @@ matching the user-mode pivot artifact byte for byte. The AArch32 execution
 pivot now has a focused gate: an ELF32/ARM image enters AArch32 EL0, exercises
 the ARM EABI and BSS/stack contract, returns to the AArch64 builder shell, and
 validates 32-bit `argc`/`argv`/`envp`. The gate passes both virtio transports.
-Executing the independently reproduced ARMv7 M2-Planet and comparing its
-output is the remaining acceptance step for milestone 4.
+The pivot gate then runs the ARMv7 M2-Planet produced by the independent
+user-mode pivot with its real 31-entry argument vector. Both transports
+produce the same 376,490-byte M1 output, SHA-256
+`9c3a8e2878c673b074a51157704fd84c8f92f96b0506c93a390e469b9f8cc543`.
+This completes the builder's AArch64-to-AArch32 execution handoff; deriving
+the ARMv7 M2-Planet inside the builder, instead of supplying the independently
+checked artifact, remains an end-to-end provenance improvement.
 
 ## Design and bug log
 
@@ -257,3 +264,9 @@ output is the remaining acceptance step for milestone 4.
   The SVC32 vector saves the complete bank first, then explicitly zero-extends
   R0-R7 before shared pointer arithmetic because their upper halves are
   architecturally unknown.
+- The focused ELF32 fixture initially hid a layout mismatch by linking at the
+  AArch64 seed's `0x00600000` base. Canonical ARMv7 stage0 links at
+  `0x00010000`. The loader now remaps the same 32 MiB physical process arena
+  to `0x00600000..0x02600000` for AArch64 or
+  `0x00000000..0x02000000` for AArch32 and invalidates stale translations
+  whenever an ELF changes the execution state.
